@@ -1,0 +1,22 @@
+{
+  "slug": "crypto",
+  "display_name": "Crypto",
+  "enabled": true,
+  "sources": {
+    "rss": {
+      "category": "crypto",
+      "feeds": [
+        "https://decrypt.co/feed",
+        "https://www.coindesk.com/arc/outboundfeeds/rss/"
+      ]
+    },
+    "hackernews": {
+      "query": "crypto",
+      "limit": 30
+    },
+    "gdelt": {
+      "query": "cryptocurrency",
+      "limit": 30
+    }
+  }
+}

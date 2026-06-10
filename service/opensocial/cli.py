@@ -63,7 +63,7 @@ def fetch(
     if niche:
         from pathlib import Path
 
-        path = Path(config_dir) / f"{niche}.yaml"
+        path = Path(config_dir) / f"{niche}.json"
         if not path.exists():
             typer.echo(f"No niche config at {path}", err=True)
             raise typer.Exit(1)

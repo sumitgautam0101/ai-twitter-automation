@@ -40,7 +40,7 @@ opensocial/
   core/
     models.py     # ContentItem — the normalized content format
     db.py         # SQLAlchemy models + idempotent storage
-    config.py     # niche YAML loading
+    config.py     # niche JSON loading
   sources/
     base.py       # Source ABC + registry (@register)
     rss.py        # generic RSS/Atom (reused across feed sources)
@@ -48,7 +48,7 @@ opensocial/
     gdelt.py      # GDELT DOC 2.0 API
   cli.py          # `fetch`, `sources`
 config/niches/
-  crypto.yaml     # one simplified Phase 1 niche
+  crypto.json     # one simplified Phase 1 niche
 ```
 
 ## Adding a source

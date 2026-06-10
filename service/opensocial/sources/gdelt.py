@@ -11,6 +11,7 @@ mode, so ``sentiment`` is left null here until a richer mode is wired in.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import httpx
@@ -19,6 +20,12 @@ from opensocial.core.models import ContentItem
 from opensocial.sources.base import DEFAULT_TIMEOUT, USER_AGENT, Source, register
 
 API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+# GDELT asks for no more than one request every 5 seconds and returns HTTP 429
+# otherwise. Real polling runs far slower than that, but back off-and-retry
+# keeps bursts (e.g. several niches fetched together) from failing outright.
+_RETRY_BACKOFF_SECONDS = 6.0
+_MAX_RETRIES = 2
 
 
 def _parse_seendate(value: str | None) -> datetime:
@@ -52,7 +59,12 @@ class GDELTSource(Source):
         async with httpx.AsyncClient(
             timeout=DEFAULT_TIMEOUT, headers={"User-Agent": USER_AGENT}
         ) as client:
-            resp = await client.get(API_URL, params=params)
+            for attempt in range(_MAX_RETRIES + 1):
+                resp = await client.get(API_URL, params=params)
+                if resp.status_code == 429 and attempt < _MAX_RETRIES:
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                break
             resp.raise_for_status()
             try:
                 data = resp.json()

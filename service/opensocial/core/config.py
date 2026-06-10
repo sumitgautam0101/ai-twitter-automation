@@ -1,16 +1,15 @@
 """Niche profile loading.
 
-Phase 1 keeps niche config on disk as YAML. A niche names which sources it
+Phase 1 keeps niche config on disk as JSON. A niche names which sources it
 enables and the per-source settings (feeds, queries, limits). Later phases
 mirror this into the ``niche_profiles`` DB table for the dashboard.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-
-import yaml
 
 
 @dataclass
@@ -35,13 +34,13 @@ class NicheConfig:
 
 def load_niche(path: str | Path) -> NicheConfig:
     with open(path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
+        data = json.load(fh)
     return NicheConfig.from_dict(data)
 
 
 def load_all_niches(config_dir: str | Path) -> list[NicheConfig]:
     config_dir = Path(config_dir)
     niches: list[NicheConfig] = []
-    for path in sorted(config_dir.glob("*.yaml")) + sorted(config_dir.glob("*.yml")):
+    for path in sorted(config_dir.glob("*.json")):
         niches.append(load_niche(path))
     return niches
