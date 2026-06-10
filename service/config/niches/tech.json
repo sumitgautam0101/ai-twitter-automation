@@ -1,0 +1,44 @@
+{
+  "slug": "tech",
+  "display_name": "Tech & Dev",
+  "enabled": true,
+  "sources": {
+    "hackernews": {
+      "query": "",
+      "limit": 30
+    },
+    "devto": {
+      "tag": "technology",
+      "limit": 15,
+      "full_text": false
+    },
+    "github_releases": {
+      "repos": ["python/cpython", "openai/openai-python", "langchain-ai/langchain"],
+      "limit": 5
+    },
+    "arxiv": {
+      "query": "cat:cs.AI OR cat:cs.LG",
+      "limit": 20
+    },
+    "medium": {
+      "category": "tech",
+      "tags": ["technology", "programming"]
+    },
+    "producthunt": {
+      "enabled": false,
+      "limit": 20
+    },
+    "youtube": {
+      "enabled": false,
+      "query": "ai news",
+      "limit": 5,
+      "transcripts": true
+    },
+    "reddit": {
+      "enabled": false,
+      "subreddits": ["technology", "programming"],
+      "sort": "hot",
+      "limit": 15
+    }
+  }
+}

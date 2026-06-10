@@ -1,0 +1,23 @@
+{
+  "slug": "finance",
+  "display_name": "Finance",
+  "enabled": true,
+  "sources": {
+    "yfinance": {
+      "symbols": ["AAPL", "MSFT", "TSLA", "BTC-USD"],
+      "limit": 10
+    },
+    "rss": {
+      "category": "finance",
+      "feeds": [
+        "https://feeds.marketwatch.com/marketwatch/topstories/",
+        "https://feeds.marketwatch.com/marketwatch/marketpulse/"
+      ]
+    },
+    "finnhub": {
+      "enabled": false,
+      "category": "general",
+      "limit": 30
+    }
+  }
+}

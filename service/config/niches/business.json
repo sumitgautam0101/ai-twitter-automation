@@ -1,0 +1,19 @@
+{
+  "slug": "business",
+  "display_name": "Business & Startups",
+  "enabled": true,
+  "sources": {
+    "rss": {
+      "category": "business",
+      "feeds": [
+        "https://www.ycombinator.com/blog/rss",
+        "https://feeds.hbr.org/harvardbusiness",
+        "https://www.indiehackers.com/feed.xml"
+      ]
+    },
+    "producthunt": {
+      "enabled": false,
+      "limit": 20
+    }
+  }
+}

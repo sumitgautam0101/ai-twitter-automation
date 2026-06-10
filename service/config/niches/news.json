@@ -1,0 +1,16 @@
+{
+  "slug": "news",
+  "display_name": "News & Politics",
+  "enabled": true,
+  "sources": {
+    "gdelt": {
+      "query": "breaking news",
+      "limit": 30
+    },
+    "guardian": {
+      "enabled": false,
+      "section": "world",
+      "limit": 20
+    }
+  }
+}

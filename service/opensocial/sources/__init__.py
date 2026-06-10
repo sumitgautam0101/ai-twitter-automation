@@ -12,4 +12,19 @@ from opensocial.sources.base import (  # noqa: F401
 )
 
 # Import plugin modules for their registration side effects.
-from opensocial.sources import gdelt, hackernews, rss  # noqa: F401,E402
+from opensocial.sources import (  # noqa: F401,E402
+    arxiv,
+    devto,
+    finnhub,
+    gdelt,
+    github_releases,
+    guardian,
+    hackernews,
+    medium,
+    nasa,
+    producthunt,
+    reddit,
+    rss,
+    youtube,
+    yfinance_source,
+)

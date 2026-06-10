@@ -25,6 +25,8 @@ async def _fetch_niche(niche: NicheConfig, session_factory) -> None:
 
     typer.echo(f"[{niche.slug}] {niche.display_name}")
     for source_name, source_cfg in niche.sources.items():
+        if source_cfg.get("enabled") is False:
+            continue
         try:
             source_cls = get_source(source_name)
         except KeyError as exc:
