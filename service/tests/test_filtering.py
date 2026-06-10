@@ -79,6 +79,32 @@ def test_near_duplicate_detection(session_factory):
     assert counts["duplicate"] == 1
 
 
+def test_near_duplicate_respects_recent_window(session_factory):
+    now = datetime.now(timezone.utc)
+    items = [
+        _item("OpenAI releases new GPT model for developers",
+              url="https://a.com/1", published=now - timedelta(days=10)),
+        # Same story but seen 10 days later — outside the dup window, so it is a
+        # fresh candidate, not a duplicate of the stale one.
+        _item("OpenAI releases new GPT model for developers",
+              url="https://b.com/2", published=now),
+    ]
+    config = {
+        "filters": {
+            "relevance_keywords": [],
+            "dup_threshold": 0.7,
+            "dup_window_days": 3,
+        }
+    }
+
+    with session_factory() as session:
+        store_items(session, items, NICHE)
+        counts = filter_niche(session, NICHE, config)
+
+    assert counts["candidate"] == 2
+    assert counts["duplicate"] == 0
+
+
 def test_queue_orders_by_priority(session_factory):
     now = datetime.now(timezone.utc)
     items = [

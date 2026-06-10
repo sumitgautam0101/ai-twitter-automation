@@ -51,8 +51,10 @@ by `sha256(source_name + url)`, so repeat runs won't create duplicates.
 * **filtered** — contains a blocklisted keyword, fails the relevance-keyword
   threshold, or is older than `max_age_days`.
 * **duplicate** — title is a near-duplicate (Jaccard ≥ `dup_threshold`) of an
-  already-accepted candidate, i.e. the same story reprinted elsewhere. The
-  earliest-published copy is kept.
+  already-accepted candidate published within the last `dup_window_days`, i.e.
+  the same story reprinted elsewhere. The earliest copy is kept; comparisons are
+  bounded to that recent window so the check matches only *recently seen*
+  content and stays fast as the table grows.
 * **candidate** — survived everything; gets a `relevance_score`.
 
 `queue` then orders the candidates by a weighted blend of recency (half-life
@@ -67,7 +69,8 @@ Both are driven by per-niche config blocks:
   "relevance_keywords": ["ai", "open source", "model"],
   "relevance_threshold": 1,      // min keyword hits to be relevant
   "max_age_days": 7,
-  "dup_threshold": 0.8           // 0..1 title similarity = duplicate
+  "dup_threshold": 0.8,          // 0..1 title similarity = duplicate
+  "dup_window_days": 3           // only dedup against items this recent
 },
 "prioritization": {
   "recency_weight": 0.5,

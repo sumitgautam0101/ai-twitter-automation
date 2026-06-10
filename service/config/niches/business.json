@@ -7,7 +7,8 @@
     "relevance_keywords": ["startup", "founder", "funding", "vc", "venture", "saas", "product", "growth", "revenue", "acquisition", "ipo", "strategy", "leadership", "market"],
     "relevance_threshold": 1,
     "max_age_days": 10,
-    "dup_threshold": 0.8
+    "dup_threshold": 0.8,
+    "dup_window_days": 5
   },
   "prioritization": {
     "recency_weight": 0.45,

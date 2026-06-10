@@ -7,7 +7,8 @@
     "relevance_keywords": ["ai", "ml", "model", "software", "developer", "code", "open source", "startup", "data", "cloud", "api", "release", "framework", "llm"],
     "relevance_threshold": 1,
     "max_age_days": 7,
-    "dup_threshold": 0.8
+    "dup_threshold": 0.8,
+    "dup_window_days": 3
   },
   "prioritization": {
     "recency_weight": 0.5,

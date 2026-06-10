@@ -7,7 +7,8 @@
     "relevance_keywords": ["stock", "market", "earnings", "fed", "rates", "inflation", "economy", "shares", "revenue", "ipo", "treasury", "nasdaq", "s&p", "dividend"],
     "relevance_threshold": 1,
     "max_age_days": 3,
-    "dup_threshold": 0.8
+    "dup_threshold": 0.8,
+    "dup_window_days": 2
   },
   "prioritization": {
     "recency_weight": 0.6,

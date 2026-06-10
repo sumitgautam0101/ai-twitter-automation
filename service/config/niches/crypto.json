@@ -7,7 +7,8 @@
     "relevance_keywords": ["bitcoin", "btc", "ethereum", "eth", "crypto", "blockchain", "defi", "token", "stablecoin", "sec", "etf", "wallet", "exchange", "mining"],
     "relevance_threshold": 1,
     "max_age_days": 3,
-    "dup_threshold": 0.8
+    "dup_threshold": 0.8,
+    "dup_window_days": 2
   },
   "prioritization": {
     "recency_weight": 0.6,

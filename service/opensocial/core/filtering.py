@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -49,6 +49,7 @@ class FilterConfig:
     relevance_threshold: int = 1  # min keyword hits to be considered relevant
     max_age_days: float | None = None
     dup_threshold: float = 0.8  # Jaccard similarity (0..1) above which = duplicate
+    dup_window_days: float = 3.0  # only compare against items this recent (per spec)
 
     @classmethod
     def from_niche(cls, raw: dict) -> "FilterConfig":
@@ -61,6 +62,7 @@ class FilterConfig:
                 float(f["max_age_days"]) if f.get("max_age_days") is not None else None
             ),
             dup_threshold=float(f.get("dup_threshold", 0.8)),
+            dup_window_days=float(f.get("dup_window_days", 3.0)),
         )
 
 
@@ -173,20 +175,32 @@ def filter_niche(session: Session, niche_slug: str, raw_config: dict) -> dict[st
     ).all()
 
     counts = {"candidate": 0, "filtered": 0, "duplicate": 0}
-    kept_token_sets: list[set[str]] = []  # accepted candidates, for dup comparison
+    # Accepted candidates kept as (published_at, title_tokens), oldest-first, for
+    # near-dup comparison. Bounded to a recent window so the check compares only
+    # against "recently seen content" (project.md) instead of all history —
+    # which also keeps it from degrading to O(n^2) as the table grows.
+    window = timedelta(days=cfg.dup_window_days)
+    recent: list[tuple[datetime, set[str]]] = []
 
     for link, row in rows:
         status, relevance = _evaluate(row, cfg, now)
 
         if status == "candidate":
+            published = _as_utc(row.published_at) or now
+            # Rows arrive oldest-first, so anything older than the window vs. the
+            # current item will stay out of range for all later items too — drop it.
+            cutoff = published - window
+            while recent and recent[0][0] < cutoff:
+                recent.pop(0)
+
             tokens = _tokens(row.title)
             is_dup = any(
-                _jaccard(tokens, seen) >= cfg.dup_threshold for seen in kept_token_sets
+                _jaccard(tokens, seen) >= cfg.dup_threshold for _, seen in recent
             )
             if is_dup:
                 status = "duplicate"
             else:
-                kept_token_sets.append(tokens)
+                recent.append((published, tokens))
 
         link.status = status
         link.relevance_score = relevance if status == "candidate" else 0.0

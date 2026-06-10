@@ -7,7 +7,8 @@
     "relevance_keywords": ["research", "study", "scientists", "discovery", "space", "physics", "biology", "health", "climate", "nasa", "quantum", "genome", "experiment", "data"],
     "relevance_threshold": 1,
     "max_age_days": 14,
-    "dup_threshold": 0.8
+    "dup_threshold": 0.8,
+    "dup_window_days": 7
   },
   "prioritization": {
     "recency_weight": 0.4,

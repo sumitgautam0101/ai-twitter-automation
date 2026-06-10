@@ -7,7 +7,8 @@
     "relevance_keywords": [],
     "relevance_threshold": 1,
     "max_age_days": 2,
-    "dup_threshold": 0.75
+    "dup_threshold": 0.75,
+    "dup_window_days": 1
   },
   "prioritization": {
     "recency_weight": 0.7,
