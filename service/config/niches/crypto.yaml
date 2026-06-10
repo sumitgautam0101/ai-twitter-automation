@@ -1,0 +1,21 @@
+# Simplified Phase 1 niche profile. Persona / filters / schedule / approval
+# settings arrive in later phases — for now a niche just names which sources
+# it pulls from and their per-source settings.
+slug: crypto
+display_name: Crypto
+enabled: true
+
+sources:
+  rss:
+    category: crypto
+    feeds:
+      - https://decrypt.co/feed
+      - https://www.coindesk.com/arc/outboundfeeds/rss/
+
+  hackernews:
+    query: crypto
+    limit: 30
+
+  gdelt:
+    query: cryptocurrency
+    limit: 30
