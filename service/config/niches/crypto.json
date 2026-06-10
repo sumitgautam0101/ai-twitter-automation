@@ -2,6 +2,19 @@
   "slug": "crypto",
   "display_name": "Crypto",
   "enabled": true,
+  "filters": {
+    "blocklist": ["giveaway", "airdrop scam", "double your", "pump group", "guaranteed returns", "nsfw"],
+    "relevance_keywords": ["bitcoin", "btc", "ethereum", "eth", "crypto", "blockchain", "defi", "token", "stablecoin", "sec", "etf", "wallet", "exchange", "mining"],
+    "relevance_threshold": 1,
+    "max_age_days": 3,
+    "dup_threshold": 0.8
+  },
+  "prioritization": {
+    "recency_weight": 0.6,
+    "engagement_weight": 0.3,
+    "sentiment_weight": 0.1,
+    "half_life_hours": 12
+  },
   "sources": {
     "rss": {
       "category": "crypto",

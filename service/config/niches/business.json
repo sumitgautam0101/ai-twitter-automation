@@ -2,6 +2,19 @@
   "slug": "business",
   "display_name": "Business & Startups",
   "enabled": true,
+  "filters": {
+    "blocklist": ["nsfw", "mlm", "get rich quick", "sponsored"],
+    "relevance_keywords": ["startup", "founder", "funding", "vc", "venture", "saas", "product", "growth", "revenue", "acquisition", "ipo", "strategy", "leadership", "market"],
+    "relevance_threshold": 1,
+    "max_age_days": 10,
+    "dup_threshold": 0.8
+  },
+  "prioritization": {
+    "recency_weight": 0.45,
+    "engagement_weight": 0.4,
+    "sentiment_weight": 0.15,
+    "half_life_hours": 36
+  },
   "sources": {
     "rss": {
       "category": "business",

@@ -10,3 +10,6 @@ asyncpraw>=7.7              # reddit
 google-api-python-client>=2.0   # youtube
 youtube-transcript-api>=0.6     # youtube transcripts
 yfinance>=0.2              # yahoo finance
+
+# dev
+pytest>=8.0

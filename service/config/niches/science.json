@@ -2,6 +2,19 @@
   "slug": "science",
   "display_name": "Health & Science",
   "enabled": true,
+  "filters": {
+    "blocklist": ["miracle cure", "anti-vax", "nsfw", "clickbait"],
+    "relevance_keywords": ["research", "study", "scientists", "discovery", "space", "physics", "biology", "health", "climate", "nasa", "quantum", "genome", "experiment", "data"],
+    "relevance_threshold": 1,
+    "max_age_days": 14,
+    "dup_threshold": 0.8
+  },
+  "prioritization": {
+    "recency_weight": 0.4,
+    "engagement_weight": 0.35,
+    "sentiment_weight": 0.25,
+    "half_life_hours": 48
+  },
   "sources": {
     "arxiv": {
       "query": "cat:physics.gen-ph",

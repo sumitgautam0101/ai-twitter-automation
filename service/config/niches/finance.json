@@ -2,6 +2,19 @@
   "slug": "finance",
   "display_name": "Finance",
   "enabled": true,
+  "filters": {
+    "blocklist": ["get rich quick", "hot stock tip", "guaranteed returns", "nsfw"],
+    "relevance_keywords": ["stock", "market", "earnings", "fed", "rates", "inflation", "economy", "shares", "revenue", "ipo", "treasury", "nasdaq", "s&p", "dividend"],
+    "relevance_threshold": 1,
+    "max_age_days": 3,
+    "dup_threshold": 0.8
+  },
+  "prioritization": {
+    "recency_weight": 0.6,
+    "engagement_weight": 0.25,
+    "sentiment_weight": 0.15,
+    "half_life_hours": 12
+  },
   "sources": {
     "yfinance": {
       "symbols": ["AAPL", "MSFT", "TSLA", "BTC-USD"],
