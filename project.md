@@ -1,8 +1,10 @@
-# OpenSocial — Architecture Plan
+# OpenX — Architecture
+
+> **Status:** the MVP is built. The full pipeline (fetch → filter → generate → schedule → publish), the FastAPI dashboard backend, and the React dashboard all exist. This document was written as a forward plan and has since been reconciled with what actually shipped; section "Build Phasing" at the end records the original phase ordering for context. Where the build diverged from the plan (config moved YAML→JSON, AI image generation dropped, GDELT/Finnhub replaced by Google News, a real HTTP API added), the prose below reflects the shipped behavior.
 
 ## Context
 
-OpenSocial is an open-source, plugin-based tool for automated, AI-driven posting to **X (Twitter)**. Any "niche" (crypto, tech, finance, etc.) can be configured with its own content sources, AI persona/prompts, posting schedule with anti-bot randomness, optional Telegram approval workflow, and a dashboard for full configuration.
+OpenX is an open-source, plugin-based tool for automated, AI-driven posting to **X (Twitter)**. Any "niche" (crypto, tech, finance, etc.) can be configured with its own content sources, AI persona/prompts, posting schedule with anti-bot randomness, optional Telegram approval gate, and a dashboard for full configuration. 18 niche profiles ship out of the box.
 
 
 
@@ -10,19 +12,18 @@ OpenSocial is an open-source, plugin-based tool for automated, AI-driven posting
 
 | Concern | Choice | Why |
 |---|---|---|
-| Language/runtime | Python 3.12, asyncio | Every library needed (X API, AI, Telegram) is Python-first; runs on a cheap VPS or Raspberry Pi |
+| Language/runtime | Python 3.12, asyncio | Every library needed (X API, AI) is Python-first; runs on a cheap VPS or Raspberry Pi |
 | HTTP client | httpx (async) | Concurrent fetching across all sources |
 | Reddit | asyncpraw | Official async fork of PRAW |
 | RSS/Atom | feedparser | Universal parser for the generic RSS plugin |
 | YouTube | google-api-python-client + youtube-transcript-api | Channel data + transcripts |
 | Scheduler | APScheduler (async, DB-backed job store) | Persists jobs in the same SQLite database, no Redis/Celery needed |
 | Database | SQLite | Single file, zero-config, shared directly with the separate dashboard project |
-| AI text | LiteLLM | One interface across OpenAI/Anthropic/Gemini/Ollama — fully swappable providers |
-| AI images | Pollinations.ai (free, default) + Replicate/DALL-E as paid options | Zero-cost default image generation |
-| Stock images | Pixabay (default), Unsplash, Pexels | Free, no attribution required for Pixabay |
+| AI text | LiteLLM | One interface across OpenAI/Anthropic/Gemini/Ollama — fully swappable providers; default is a local Ollama model (no key). An offline template provider is available for tests/offline runs. |
+| Images | Unsplash (stock) or the source item's own media | AI image *generation* (Pollinations/DALL·E) was dropped after Pollinations moved to a paid, rate-limited model; images now come only from real sources |
 | X posting | Tweepy | Covers posting + media upload |
-| Telegram | python-telegram-bot (async) | Notifications + approval queue with inline buttons | 
-| Secrets | Encrypted at rest (Fernet) | API keys and platform credentials stored encrypted, key from an environment variable |
+| Dashboard API | FastAPI + uvicorn | Thin HTTP layer the browser dashboard calls (`/api/*`) |
+| Secrets | Encrypted at rest (Fernet) | API keys and platform credentials stored encrypted, key from `OPENSOCIAL_SECRET_KEY` (or a key file) |
 
 ---
 
@@ -32,22 +33,23 @@ The system is organized as a set of plugin packages built around a shared "conte
 
 - **Sources** — one plugin per content source (or a generic RSS plugin reused across many feeds). Each plugin fetches and normalizes content into a common format. Adding a new source means adding a new plugin, with no changes elsewhere.
 - **AI (text)** — generates post text from a content item and a niche's persona/prompt, via a swappable AI provider (Ollama by default — no API key required).
-- **AI (images)** — supplies an image for a post, either AI-generated or from a stock photo provider, behind a single interface.
+- **AI (images)** — supplies an image for a post, either from a stock photo provider (Unsplash) or the source item's own media, behind a single interface.
 - **Publisher** — posts to X (via Tweepy), built behind a publisher interface so other platforms could be added later as additional plugins.
 - **Scheduler** — decides when posts go out, with randomized timing/jitter to avoid bot-like patterns, and enforces daily post limits.
-- **Telegram bot** — sends notifications and, optionally, an approval queue (approve/edit/regenerate/reject) before anything is posted.
 - **Core** — shared data models, the SQLite database layer, and the pipeline that ties fetch → filter → generate → schedule → publish together.
 
 ---
 
 ## Project Structure
 
-OpenSocial is split into two independently-deployable projects sharing one SQLite database:
+OpenX is split into two independently-deployable projects sharing one SQLite database:
 
-- **service** (Python) — everything described above in High-Level Structure: source plugins, filtering/dedup, AI text & image generation, the X publisher, scheduler, Telegram bot, and CLI. It's the only component that writes to `content_items`, `generated_posts`, and `post_history`, and it reads the configuration tables to know what to do.
-- **ui** (React/Next.js, separate project) — the dashboard described later in this plan. It writes only to the configuration tables (niche profiles, source settings, secrets, platform accounts, Telegram chats) and reads everything for display (queue, history, cost tracking, live config). It contains no automation logic.
+- **service** (Python) — everything described above in High-Level Structure: source plugins, filtering/dedup, AI text & image attachment, the X publisher, scheduler, CLI, **and** a FastAPI app that backs the dashboard. It owns the content/post/history tables and reads the configuration to know what to do.
+- **dashboard** (React + Vite, separate project) — the configuration & monitoring UI described later. It calls the service's HTTP API (`/api/*`) for everything; it contains no automation logic and does not touch SQLite directly.
 
-This split keeps automation and configuration cleanly separated: `service` owns *what happens*, `ui` owns *what's configured* and *what's shown*.
+This split keeps automation and configuration cleanly separated: `service` owns *what happens*, `dashboard` owns *what's configured* and *what's shown*.
+
+The dashboard does not write to SQLite itself (the original plan had it sharing the file directly). Instead the service exposes a small HTTP API: reads query the DB; fast state changes (approve/reject/edit, config edits, toggles) apply synchronously; slow actions (fetch/generate/publish) are enqueued in the `commands` table and run by the background worker that `opensocial serve` starts alongside the API.
 
 ---
 
@@ -57,65 +59,82 @@ Every source plugin returns content normalized into a common "content item" shap
 
 AI generation always works from this normalized item — it never needs to know which source it came from.
 
-**Field availability varies by source.** Full `body` text is available from Reddit, YouTube (via transcript), Medium/Decrypt/The Block/YC Blog (via `content:encoded`), Dev.to, GitHub Releases, and the Guardian; the rest (GDELT, CoinDesk, Reuters/MarketWatch, WHO, Nature/PhysOrg/Futurism, HBR, ArXiv, Finnhub, yfinance, ProductHunt, NASA) only provide a `summary`/excerpt — so the standard fallback is `content_for_ai = item.body or item.summary or item.title`. `sentiment` is natively populated only by GDELT (`tone` score, normalized to -1..1); every other source leaves it null. `engagement` is a flexible JSON dict whose shape differs per source (Reddit: score/comments/upvote_ratio; YouTube: views/likes/comments; Hacker News: score/comments; Dev.to: reactions/comments/reading_time; ProductHunt: votes/comments; GitHub Releases: downloads) — most RSS-based sources leave it null. `language` is rarely provided per item (GDELT and the Guardian are exceptions) and otherwise defaults to `en`.
+**Field availability varies by source.** Full `body` text is available from Reddit, YouTube (via transcript), Medium/Decrypt/The Block/YC Blog (via `content:encoded`), Dev.to, GitHub Releases, and the Guardian; the rest (Google News, CoinDesk, Reuters/MarketWatch, WHO, Nature/PhysOrg/Futurism, HBR, ArXiv, yfinance, ProductHunt, NASA) only provide a `summary`/excerpt — so the standard fallback is `content_for_ai = item.body or item.summary or item.title`. No shipped source currently populates `sentiment`, so it stays null and the prioritization blend redistributes its weight when no `sentiment_target` is set. `engagement` is a flexible JSON dict whose shape differs per source (Reddit: score/comments/upvote_ratio; YouTube: views/likes/comments; Hacker News: score/comments; Dev.to: reactions/comments/reading_time; ProductHunt: votes/comments; GitHub Releases: downloads) — most RSS-based sources leave it null. `language` is rarely provided per item (the Guardian is an exception) and otherwise defaults to `en`.
 
 ---
 
-## Content Sources (24)
+## Content Sources
 
-**Universal**
-- GDELT DOC 2.0 API — global news/trend feed with sentiment scoring (replaces Google News RSS)
-- Reddit (PRAW)
-- YouTube Data API (with transcripts)
-- Generic RSS parser (reused for most RSS-based sources below)
-- Medium RSS (by tag)
+13 source plugins ship, registered via `@register` on the `Source` ABC (`opensocial/sources/`). The generic `rss` plugin is reused across many feeds, so the per-niche source list covers far more outlets than there are plugins (Decrypt, CoinDesk, The Block, Reuters/MarketWatch, WHO, Nature/PhysOrg/Futurism, HBR, Indie Hackers, YC Blog, TechCrunch, Ars Technica, … are all `rss` feeds configured per niche).
 
-**Tech & Dev**
-- Hacker News API
-- Dev.to API
-- GitHub Releases (via GitHub REST API)
-- ProductHunt API (requires applying for API access)
-- ArXiv API
+| Plugin | Source | Auth |
+|---|---|---|
+| `googlenews` | Google News RSS — global news/trend feed via per-query search RSS | none |
+| `rss` | Generic RSS/Atom parser, reused for most feed-based outlets | none |
+| `reddit` | Reddit (public `.json` endpoints via httpx) | none |
+| `youtube` | YouTube Data API (with transcripts) | API key |
+| `medium` | Medium RSS (by tag/category) | none |
+| `hackernews` | Hacker News API | none |
+| `devto` | Dev.to API | none |
+| `github_releases` | GitHub Releases (GitHub REST API) | optional token |
+| `arxiv` | ArXiv API | none |
+| `producthunt` | Product Hunt API | API access |
+| `nasa` | NASA API | API key (DEMO_KEY works) |
+| `guardian` | The Guardian API | API key |
+| `yfinance` | Yahoo Finance / yfinance (unofficial) | none |
 
-**Crypto**
-- Decrypt RSS
-- CoinDesk RSS
-- The Block RSS
-
-**Finance**
-- Finnhub API
-- Yahoo Finance / yfinance (unofficial, falls back to Finnhub)
-- Reuters / MarketWatch RSS
-
-**News & Politics**
-- The Guardian API
-
-**Health & Science**
-- WHO RSS
-- NASA API
-- Nature / PhysOrg / Futurism RSS
-
-**Business & Startups**
-- ProductHunt API (shared with Tech & Dev)
-- Indie Hackers RSS
-- Y Combinator Blog RSS
-- HBR RSS
+**Removed:** GDELT (its DOC 2.0 API rate-limited at 1 req/5s and starved most niches — replaced by Google News) and Finnhub. Don't reintroduce them.
 
 ---
 
 ## Niche Profiles
 
-Each niche (e.g. "crypto", "tech") is a configuration profile that defines:
+Each niche (e.g. "crypto", "tech") is a **JSON** configuration profile under `config/niches/<slug>.json` (the source of truth; also mirrored into `niche_profiles`). It defines:
 
-- **Persona** — voice/tone and the prompt template used to turn a content item into a post (instructed to write standalone text, not assuming a link will be attached).
-- **AI settings** — which text provider/model to use, and how images are sourced (AI-generated, stock photo, or none).
-- **Filters** — keyword blocklist, relevance keywords/threshold, and age limits for content.
-- **Sources** — which of the 24 sources are enabled for this niche, with source-specific settings (subreddits, channel IDs, feed URLs, search queries, poll intervals).
-- **Schedule** — posting time windows, posts-per-day range, minimum gap between posts, and random jitter.
-- **Approval** — whether posts require Telegram approval before publishing, and what happens on timeout.
+- **Persona** — voice/tone/style/length and the instructions used to turn a content item into a post (instructed to write standalone text, not assuming a link will be attached).
+- **AI settings** — which text provider/model/temperature to use (`ai.text`).
+- **Image source** — the per-niche `image_source` field: `unsplash` (stock), `content` (the source item's own media), or `none`.
+- **Filters** — keyword blocklist, relevance keywords/threshold, max age, and near-duplicate threshold/window.
+- **Prioritization** — recency/engagement/relevance/sentiment weights and the recency half-life.
+- **Post types** — which of the seven types are enabled, with optional per-type daily caps and visual-rule overrides.
+- **Independent take** — the daily independent-post job (count, eligible types, image mode).
+- **Sources** — which source plugins are enabled for this niche, with source-specific settings (subreddits, channel IDs, feed URLs, search queries, limits).
+- **Schedule** — posting time windows, posts-per-day range, and minimum gap between posts.
+- **Approval** — optional per-niche Telegram gate (`required`, `timeout_minutes`, `on_timeout`).
 - **Posting** — whether the post includes the source link (off by default, to keep X cost at $0.015/post).
 
-The dashboard lets users create new niches from starter templates (crypto, tech, finance, science, news, business) and edit every one of these settings.
+18 niche profiles ship (ai, business, crypto, education, entertainment, finance, fitness, gaming, health, lifestyle, marketing, news, politics, science, self-improvement, sports, startups, tech). The dashboard lets users create new niches and edit every one of these settings.
+
+---
+
+## Post Types
+
+Every generated post has a **post type** that selects the prompt template and the visual rule. The taxonomy (absorbed from a working reference implementation) is:
+
+| Type | Intent | Visual rule | Source |
+|---|---|---|---|
+| `news` | A timely development; lead with the implication, not the headline. | always | source-derived |
+| `spotlight` | Highlight a tool/repo/paper/product worth knowing. | always | source-derived |
+| `insight` | A non-obvious observation or synthesis. | optional | source-derived **or** independent |
+| `take` | A bold, opinionated stance on a topic or trend. | optional | source-derived **or** independent |
+| `tip` | A specific, actionable how-to. | optional | source-derived **or** independent |
+| `question` | Provokes genuine debate/replies. | rarely | source-derived **or** independent |
+| `meme` | Witty, relatable to the niche (the image is the point). | always | source-derived **or** independent |
+
+The post type is chosen per candidate during generation (the persona prompt is given the type and writes accordingly). Each niche's `post_types` config enables a subset, sets an optional **per-type daily cap**, and overrides the default visual rule. Visual rules resolve to `always` / `content_based` / `never` server-side (not trusted to the model) so the type→visual mapping stays consistent.
+
+Cross-cutting generation rules baked into every persona prompt (these directly serve the "standalone, no-link" design in the Niche Profiles section):
+
+- Never reference or hint at the source ("according to", outlet/account names, "saw this", links). Write it as an original thought.
+- Strong scroll-stopping hook on the first line; no corporate filler ("excited to share").
+- Respect the platform character limit, counting every URL as a flat 23 chars (t.co wrapping); one rewrite-to-fit pass before accepting an over-limit draft.
+- Strip wrapping quotes/backticks the model adds around the text.
+
+### Independent posts (e.g. the daily Take)
+
+Most posts are **source-derived** (built from a `content_item`). Some types can also be **independent** — generated purely from the niche persona/topic with no content item behind them (`generated_posts.content_item_id IS NULL`).
+
+A niche's `independent_take` config schedules **at least one independent post per day** (default: one `take`): a dedicated daily job asks the AI to write an original take in the niche's voice, sources or AI-generates an accompanying image, and enqueues it like any other draft. To guarantee it actually goes out (rather than losing the queue to fresher source-derived posts), one daily slot is reserved for the independent post, or it is enqueued with a priority floor. The set of independent-eligible types and the daily count are configurable.
 
 ---
 
@@ -123,11 +142,18 @@ The dashboard lets users create new niches from starter templates (crypto, tech,
 
 1. **Fetch** — each enabled source is polled on its own schedule; new items are de-duplicated and stored, then linked to whichever niches they're relevant to.
 2. **Filter** — each niche applies its blocklist/keyword/age filters and a near-duplicate check against recently seen content, marking items as candidates, filtered, or duplicates.
-3. **Generate** — for each niche, the highest-priority candidates (by recency, engagement, sentiment match) are turned into draft post text via the niche's persona/prompt, and an image is attached if configured.
-4. **Schedule** — each niche gets a random number of posts for the day (within its configured range), placed at random times within its posting windows, respecting minimum gaps and jitter.
-5. **Publish** — when a scheduled slot fires, if approval is required the post is sent to Telegram for review; otherwise (or once approved) it's posted to X, with the source link included or omitted per the niche's setting, and the result (success/failure, cost) is recorded.
+3. **Generate** — for each niche, the highest-priority candidates (by recency, engagement, **relevance**, and sentiment match) are assigned a post type and turned into draft post text via the niche's persona/prompt, and an image is attached per the type's visual rule. A separate daily job generates the niche's **independent post(s)** (e.g. the daily Take) with no source item behind them.
+4. **Schedule** — each niche's posting day is resolved to a set of slot times once per calendar day: a random number of slots (within the configured range) at random times within the posting windows, with the jitter **rolled once and cached** so "is this slot due yet?" doesn't flicker as the scheduler ticks. Posts are **not** pre-assigned to slots at generation time.
+5. **Publish** — when a slot fires, the engine picks the **best-scoring eligible queued post at that moment** (highest priority, respecting per-type/per-niche/global caps) rather than a pre-assigned one, so fresh high-priority content can jump the queue. If approval is required the post is sent to Telegram for review; otherwise (or once approved) it's posted to X, with the source link included or omitted per the niche's setting, and the result (success/failure, cost) is recorded. If the engine was down across slot times, it **catches up** to the number of slots that should have fired today.
 
-A global daily post cap acts as a cross-niche safety net on top of each niche's own posting limits.
+Safety and modes (absorbed from the reference implementation):
+
+- **Dry-run by default** — publishing is live only when explicitly enabled (`POST_DRY_RUN=false`); any other value stays dry and only logs what *would* post. Fail-safe so nothing goes out by accident.
+- **`app_mode: manual | auto`** — in `manual`, the engine never publishes on its own; drafts wait in the queue until "Post now" is triggered. In `auto`, slots publish automatically.
+- **Posting state machine** — a failed publish increments `post_attempts` and records `post_error`; after the max attempts the draft is marked `failed`.
+- **Overlap guard** — a scheduled job that is still running when its next tick fires skips that tick rather than running twice.
+
+A global daily post cap acts as a cross-niche safety net on top of each niche's own per-type and per-niche posting limits.
 
 ---
 
@@ -151,7 +177,7 @@ content_items (
   media_urls      JSON,               -- list[str]
   tags            JSON,               -- list[str]
   language        TEXT DEFAULT 'en',
-  sentiment       REAL,               -- -1..1; populated only by GDELT today
+  sentiment       REAL,               -- -1..1; no shipped source populates it today
   engagement      JSON,               -- shape varies per source, e.g. {"score":, "comments":}
   raw_metadata    JSON NOT NULL       -- full original API/feed item, for forward-compat
 )
@@ -168,7 +194,9 @@ niche_profiles (
   slug          TEXT PRIMARY KEY,
   display_name  TEXT NOT NULL,
   enabled       BOOLEAN NOT NULL DEFAULT 1,
-  config_yaml   TEXT NOT NULL,        -- full niche config (source of truth, also mirrored on disk)
+  config_yaml   TEXT NOT NULL,        -- full niche config as JSON (column name kept for
+                                      -- back-compat; the on-disk source of truth is
+                                      -- config/niches/<slug>.json)
   updated_at    DATETIME NOT NULL
 )
 
@@ -183,16 +211,22 @@ source_configs (
 -- Phase 3
 generated_posts (
   id                TEXT PRIMARY KEY,
-  content_item_id   TEXT REFERENCES content_items(id),
+  content_item_id   TEXT REFERENCES content_items(id),  -- NULL = independent post (e.g. daily Take)
   niche_slug        TEXT NOT NULL,
+  post_type         TEXT NOT NULL,    -- news | spotlight | insight | take | tip | question | meme
   text              TEXT NOT NULL,
   media_path        TEXT,
   media_url         TEXT,
   media_attribution TEXT,
   ai_text_provider  TEXT NOT NULL,
   ai_image_provider TEXT,
-  status            TEXT NOT NULL,    -- draft | scheduled | pending_approval | approved | rejected | published | failed
+  status            TEXT NOT NULL,    -- draft | published | rejected | failed
+                                      -- (the optional Telegram approval gate is handled by
+                                      -- approval.py, not a separate status)
+  priority_score    REAL,             -- carried from the candidate queue so the publisher can pick the best at slot time
   scheduled_at      DATETIME,
+  post_attempts     INTEGER NOT NULL DEFAULT 0,
+  post_error        TEXT,
   created_at        DATETIME NOT NULL,
   updated_at        DATETIME NOT NULL
 )
@@ -220,33 +254,50 @@ post_history (
   cost_estimate         REAL NOT NULL
 )
 
-api_keys (
-  key_name        TEXT PRIMARY KEY,
-  value_encrypted BLOB NOT NULL,
-  updated_at      DATETIME NOT NULL
+-- (The planned standalone api_keys table was folded into app_settings: dashboard
+-- secrets are stored there as Fernet-encrypted `secret:<ENV_NAME>` rows.)
+
+-- Phase 4 — dashboard ↔ service bridge. The dashboard calls the service's HTTP
+-- API; slow actions are enqueued here, and the background worker started by
+-- `opensocial serve` polls, executes them with already-loaded modules, and
+-- records the outcome.
+commands (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  type        TEXT NOT NULL,    -- fetch_sources | generate_posts | post_now | ...
+  payload     JSON,             -- e.g. {"generated_post_id": "..."} for post_now
+  status      TEXT NOT NULL,    -- pending | running | done | failed
+  result      JSON,
+  created_at  DATETIME NOT NULL,
+  finished_at DATETIME
 )
 
--- Phase 5
-telegram_chats (
-  chat_id       TEXT PRIMARY KEY,
-  role          TEXT NOT NULL,  -- notifications | approval | both
-  registered_at DATETIME NOT NULL
+-- Console output mirrored here so the dashboard can show service logs.
+logs (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  level     TEXT NOT NULL,      -- info | warn | error
+  message   TEXT NOT NULL,
+  logged_at DATETIME NOT NULL
+)
+
+-- Runtime settings the dashboard can change without a service restart, plus
+-- Fernet-encrypted secrets saved from the dashboard. resolve_settings() overlays
+-- these on top of the environment each scheduler tick.
+app_settings (
+  key   TEXT PRIMARY KEY,   -- dry_run | app_mode | global_daily_cap |
+                            -- autopilot_fetch_minutes | secret:<ENV_NAME> | ...
+  value TEXT NOT NULL
 )
 ```
 
 ---
 
-## Telegram Bot
-
-Provides status commands (active niches, upcoming posts, pending approvals) and pause/resume per niche.
-
-When approval is required, each draft post is sent as a card with the generated text, image, and source attribution, with buttons to approve, edit (reply with new text), regenerate (re-run AI generation), or reject. Unapproved posts can either auto-publish or be discarded after a configurable timeout.
-
----
-
 ## Dashboard (Separate Project)
 
-The web dashboard (niche configuration, source management, schedule/queue view, post history, cost tracking, secrets) will be built as a **separate React/Next.js project**. It reads from and writes to the same SQLite database as the automation engine directly — no separate API layer initially. Detailed dashboard design is out of scope for this plan.
+The web dashboard is a **React + Vite** app (`dashboard/`). It does **not** touch SQLite directly (the original plan had it sharing the file); instead it calls the service's FastAPI backend over HTTP. The backend (`opensocial/api.py`, started by `opensocial serve`) serves reads from the DB, applies fast state changes synchronously, and routes slow actions through the `commands` queue to the background worker.
+
+Pages: **Dashboard** (overview), **Niches** (full per-niche config editor), **Queue** (draft posts — approve/reject/edit), **Schedule** (slot times, randomize), **Sources** (per-source toggles, settings, credentials), **History** (publish history + cost), **Logs** (mirrored service logs), **Settings** (dry-run/app-mode/caps, secrets), **RawData** (stored content items).
+
+Key API groups (`/api/*`): `status`/`settings`/`overview`, `niches` (+ `followed`, `schedule`, `randomize`), `posts` (+ approve/reject/edit), `content`, `history`, `logs`, `sources` (+ origins), `ai`, `commands`, `credentials`.
 
 ---
 
@@ -258,22 +309,25 @@ Cost per post is recorded in `post_history.cost_estimate` as $0.015 (text-only) 
 
 ## Build Phasing
 
+All phases below are **complete**, plus a dashboard/API phase (Phase 6) not in the original plan: the FastAPI backend (`opensocial/api.py`), the `app_settings` runtime-settings/secrets table, the `serve` command (API + background worker), autopilot draft refresh, and the React + Vite dashboard.
+
 **Phase 1 — Sources**
-Core data models (`ContentItem`) and database tables for `content_items` and `content_item_niches`; the source plugin framework (`Source` ABC + registry) and the generic RSS plugin; a first set of real plugins covering each source category (e.g. generic RSS, Hacker News, GDELT, Reddit, YouTube) to prove the pattern across both API- and feed-based sources; one simplified niche profile (with the user-selected subreddits/YouTube channels and category-based source toggles); and a CLI command to fetch and store content, de-duplicated across repeat runs.
+Core data models (`ContentItem`) and database tables for `content_items` and `content_item_niches`; the source plugin framework (`Source` ABC + registry) and the generic RSS plugin; a first set of real plugins covering each source category (e.g. generic RSS, Hacker News, Google News, Reddit, YouTube) to prove the pattern across both API- and feed-based sources; one simplified niche profile (with the user-selected subreddits/YouTube channels and category-based source toggles); and a CLI command to fetch and store content, de-duplicated across repeat runs.
 
 **Phase 2 — Data Extraction & Prioritization**
 Filtering (keyword blocklist, relevance keywords/threshold, age limits) and near-duplicate detection against recently seen content, marking each item as candidate, filtered, or duplicate; candidate prioritization by recency, engagement, and sentiment match, producing an ordered queue of candidates per niche.
 
 **Phase 3 — Post Creation**
-AI text generation via LiteLLM (Ollama by default, no API key needed) that turns prioritized candidates into standalone, no-link draft posts via the niche's persona/prompt; AI/stock image attachment; the `generated_posts` table; and CLI commands to generate drafts and preview (dry-run) what would be published.
+AI text generation via LiteLLM (Ollama by default, no API key needed) that turns prioritized candidates into standalone, no-link draft posts via the niche's persona/prompt, with a **post type** per draft (news/spotlight/insight/take/tip/question/meme) selecting the template and visual rule; the cross-cutting prompt rules (no source references, strong hook, URL-aware length with one rewrite-to-fit pass, quote stripping); AI/stock image attachment per the type's visual rule; the **independent post** path (generate a take/etc. with no source item) including the **daily Take** job; the `generated_posts` table (with `post_type`, `priority_score`, and the `post_attempts`/`post_error` state-machine columns); and CLI commands to generate drafts and preview (dry-run) what would be published.
 
 **Phase 4 — Automation**
-The X publisher (Tweepy, text-only by default per the cost strategy); the scheduler (APScheduler) with randomized posting windows, jitter, and per-niche/global frequency caps; the `post_history` table and cost tracking; remaining source plugins and niche templates (crypto, finance, science, news, business) so every content category is fully populated.
+The X publisher (Tweepy, text-only by default per the cost strategy) with **dry-run as the fail-safe default** and the `post_attempts`/`post_error` retry state machine; the scheduler (APScheduler) with randomized posting windows, **jitter rolled once per day and cached**, **best-at-slot-time** post selection (not pre-assignment) with catch-up, per-type/per-niche/global caps, an overlap guard, and the `manual`/`auto` app mode; the dashboard↔service **command queue** (`commands` table) and **log mirror** (`logs` table); the `post_history` table and cost tracking; remaining source plugins and niche templates (crypto, finance, science, news, business) so every content category is fully populated.
 
-**Phase 5 — Telegram**
-Telegram bot notifications, then the full approval queue (approve/edit/regenerate/reject) with timeout handling. At this point the pipeline runs unattended end-to-end with optional human-in-the-loop review.
+**Phase 5 — Post lifecycle & approval**
+The post-lifecycle transitions (edit / regenerate / reject), driven from the dashboard. A draft's status is one of `draft`, `published`, `rejected`, `failed`. On top of that, each niche can opt into an **optional Telegram approval gate** (`approval.py`): when `approval.required` is set, a fresh draft is sent to Telegram for approve/edit/regenerate/reject before it can publish, and `sweep_timeouts` enforces the configured `on_timeout` behavior (auto-post or discard) when no decision arrives in time.
 
-The `ui` dashboard (separate React/Next.js project — see "Project Structure") is developed in parallel once the database schema stabilizes after Phase 3; it has no dependency on the automation/Telegram work since it only reads and writes configuration tables.
+**Phase 6 — Dashboard & API** (added beyond the original plan)
+The FastAPI backend the dashboard calls (`opensocial/api.py`); the `serve` command running the API and a background worker together; `resolve_settings` overlaying dashboard runtime toggles (`app_settings`) on the environment; autopilot draft refresh inside the posting window; Fernet-encrypted secrets saved from the dashboard; and the React + Vite dashboard (`dashboard/`).
 
 ---
 
@@ -281,6 +335,6 @@ The `ui` dashboard (separate React/Next.js project — see "Project Structure") 
 
 - **Phase 1**: Fetching a niche pulls content from its enabled sources, normalizes it to `ContentItem`, and stores it without creating duplicates on repeat runs.
 - **Phase 2**: Filtering and de-duplication correctly mark items as candidate/filtered/duplicate, and the resulting candidate queue is ordered by recency, engagement, and sentiment match.
-- **Phase 3**: Generating posts for a niche produces draft text via the AI provider that reads as a standalone post (no dangling "read more"/link references), confirming the no-link-by-default design; a dry-run publish step prints what would be posted without calling the real X API; an automated test covers fetch → filter → generate end-to-end using a mocked AI response.
-- **Phase 4**: A scheduled post fires at a randomized time within its niche's posting window, respects the minimum gap/jitter and daily caps, and records a `post_history` row with the correct cost estimate.
+- **Phase 3**: Generating posts for a niche produces draft text via the AI provider that reads as a standalone post (no dangling "read more"/link references), confirming the no-link-by-default design; each draft carries a valid post type with the correct visual rule applied; the daily Take job produces an independent draft (no `content_item_id`) with an image; a dry-run publish step prints what would be posted without calling the real X API; an automated test covers fetch → filter → generate end-to-end using a mocked AI response.
+- **Phase 4**: A slot fires at a randomized (once-per-day, cached) time within its niche's posting window, publishes the best-scoring eligible queued post at that moment (not a pre-assigned one), respects the minimum gap and per-type/per-niche/global caps, and records a `post_history` row with the correct cost estimate; with `POST_DRY_RUN` unset nothing is actually published; a failed publish increments `post_attempts` and lands on `failed` after the max; a `post_now` row in `commands` triggers an on-demand publish.
 - **Phase 5**: A draft requiring approval is sent to Telegram with working approve/edit/regenerate/reject buttons, and the configured timeout behavior (auto-post or discard) fires correctly.

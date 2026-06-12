@@ -1,0 +1,80 @@
+{
+  "slug": "ai",
+  "display_name": "AI",
+  "enabled": true,
+  "filters": {
+    "blocklist": [
+      "nsfw",
+      "giveaway",
+      "promo code",
+      "sponsored",
+      "course discount"
+    ],
+    "relevance_keywords": [
+      "ai",
+      "llm",
+      "model",
+      "gpt",
+      "neural",
+      "machine learning",
+      "agent",
+      "openai",
+      "anthropic",
+      "training",
+      "inference",
+      "transformer",
+      "diffusion",
+      "rag"
+    ],
+    "relevance_threshold": 1,
+    "max_age_days": 7,
+    "dup_threshold": 0.8,
+    "dup_window_days": 3
+  },
+  "prioritization": {
+    "recency_weight": 0.4,
+    "engagement_weight": 0.25,
+    "relevance_weight": 0.2,
+    "sentiment_weight": 0.15,
+    "half_life_hours": 24
+  },
+  "sources": {
+    "arxiv": {
+      "query": "cat:cs.AI OR cat:cs.LG OR cat:cs.CL",
+      "limit": 20
+    },
+    "hackernews": {
+      "query": "ai",
+      "limit": 30
+    },
+    "googlenews": {
+      "query": "artificial intelligence",
+      "limit": 30
+    },
+    "github_releases": {
+      "repos": [
+        "openai/openai-python",
+        "huggingface/transformers",
+        "langchain-ai/langchain"
+      ],
+      "limit": 5
+    },
+    "medium": {
+      "category": "ai",
+      "tags": [
+        "artificial-intelligence",
+        "machine-learning"
+      ]
+    }
+  },
+  "persona": {
+    "style": "informative",
+    "length": "short"
+  },
+  "independent_take": {
+    "types": [],
+    "enabled": false,
+    "image": "ai"
+  },
+  "image_source": "none"
+}

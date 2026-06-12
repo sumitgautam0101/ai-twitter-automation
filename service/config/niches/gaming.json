@@ -1,0 +1,52 @@
+{
+  "slug": "gaming",
+  "display_name": "Gaming",
+  "enabled": true,
+  "filters": {
+    "blocklist": [
+      "nsfw",
+      "free v-bucks",
+      "giveaway",
+      "cheat hack download"
+    ],
+    "relevance_keywords": [
+      "game",
+      "gaming",
+      "console",
+      "playstation",
+      "xbox",
+      "nintendo",
+      "pc",
+      "esports",
+      "release",
+      "gameplay",
+      "studio",
+      "update"
+    ],
+    "relevance_threshold": 1,
+    "max_age_days": 5,
+    "dup_threshold": 0.8,
+    "dup_window_days": 2
+  },
+  "prioritization": {
+    "recency_weight": 0.5,
+    "engagement_weight": 0.3,
+    "relevance_weight": 0.1,
+    "sentiment_weight": 0.1,
+    "half_life_hours": 18
+  },
+  "sources": {
+    "googlenews": {
+      "query": "video games",
+      "limit": 30
+    },
+    "reddit": {
+      "enabled": true,
+      "subreddits": [
+        "gaming"
+      ],
+      "sort": "hot",
+      "limit": 15
+    }
+  }
+}

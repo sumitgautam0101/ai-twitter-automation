@@ -5,8 +5,21 @@ SQLAlchemy>=2.0
 pydantic>=2.7
 typer>=0.12
 
+# AI generation (Phase 3) — optional at runtime; generation falls back to an
+# offline template provider when litellm/Ollama isn't available.
+litellm>=1.40
+
+# Automation (Phase 4)
+APScheduler>=3.10           # scheduler loop
+tweepy>=4.14                # X publisher (lazy-imported)
+cryptography>=42.0          # Fernet-encrypted credentials at rest
+
+# Dashboard API (Phase 6)
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
 # source plugins
-asyncpraw>=7.7              # reddit
+# reddit uses the public .json endpoints via httpx — no extra dependency
 google-api-python-client>=2.0   # youtube
 youtube-transcript-api>=0.6     # youtube transcripts
 yfinance>=0.2              # yahoo finance

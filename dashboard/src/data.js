@@ -1,0 +1,104 @@
+// Taxonomy + theming for the OpenX console.
+// Live data comes from the service API (src/api.js); this module only keeps
+// the navigation map, color system, and a dynamic niche registry that
+// AppContext fills from GET /api/niches.
+
+export const NAV = [
+  ['dashboard', 'Dashboard'],
+  ['niches', 'Niches'],
+  ['queue', 'Queue'],
+  ['schedule', 'Schedule'],
+  ['history', 'History'],
+  ['sources', 'Sources'],
+  ['rawdata', 'Raw Data'],
+  ['logs', 'Logs'],
+  ['settings', 'Settings'],
+];
+
+// Fallback list until /api/niches loads (matches config/niches/*.json).
+export let NICHES = [
+  'politics', 'finance', 'tech', 'business', 'ai', 'crypto', 'news', 'sports',
+  'entertainment', 'gaming', 'health', 'fitness', 'self-improvement',
+  'education', 'marketing', 'startups', 'science', 'lifestyle',
+];
+
+// Global service actions, surfaced both in the top-bar Quick-actions menu and
+// on the Settings → Actions tab. [command type, label, description].
+export const QUICK_ACTIONS = [
+  ['fetch_sources', 'Fetch sources', 'pull fresh items from every enabled source'],
+  ['generate_posts', 'Generate posts', 'draft posts from today\'s candidate items'],
+  ['run_slots', 'Run due now', 'dispatch every posting slot due at this moment'],
+];
+
+const LABELS = { tech: 'Technology', ai: 'AI' };
+
+// golden-angle hue spacing → distinct, harmonious colors per category
+function colorAt(i) {
+  return `oklch(0.74 0.15 ${(i * 137 + 30) % 360})`;
+}
+
+export const NICHE_COLOR = {};
+function recolor() {
+  NICHES.forEach((s, i) => { NICHE_COLOR[s] = colorAt(i); });
+}
+recolor();
+
+export function nicheLabel(slug) {
+  if (LABELS[slug]) return LABELS[slug];
+  return slug
+    .split(/[_-]/)
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(' ');
+}
+
+// Called by AppContext with the live niche list [{slug, display_name, enabled}].
+export function setNiches(list) {
+  if (!list || !list.length) return;
+  NICHES.length = 0;
+  list.forEach((n) => {
+    NICHES.push(n.slug);
+    LABELS[n.slug] = n.display_name;
+  });
+  recolor();
+}
+
+export const STATUS_COLORS = {
+  draft: ['#9aa3af', 'rgba(154,163,175,.13)'],
+  queued: ['#7aa2f7', 'rgba(122,162,247,.14)'],
+  scheduled: ['#7aa2f7', 'rgba(122,162,247,.14)'],
+  pending: ['#9aa3af', 'rgba(154,163,175,.13)'],
+  running: ['#7aa2f7', 'rgba(122,162,247,.14)'],
+  done: ['#3ecf8e', 'rgba(62,207,142,.14)'],
+  published: ['#3ecf8e', 'rgba(62,207,142,.15)'],
+  rejected: ['#f5455c', 'rgba(245,69,92,.14)'],
+  failed: ['#f5455c', 'rgba(245,69,92,.14)'],
+  success: ['#3ecf8e', 'rgba(62,207,142,.15)'],
+};
+
+export const TYPE_COLORS = {
+  news: ['#7aa2f7', 'rgba(122,162,247,.13)'],
+  spotlight: ['#f5a524', 'rgba(245,165,36,.13)'],
+  insight: ['#b48ef7', 'rgba(180,142,247,.13)'],
+  take: ['#f5455c', 'rgba(245,69,92,.13)'],
+  tip: ['#3ecf8e', 'rgba(62,207,142,.13)'],
+  question: ['#5fd4e0', 'rgba(95,212,224,.13)'],
+  meme: ['#f78fb3', 'rgba(247,143,179,.13)'],
+};
+
+export const LEVEL_COLORS = {
+  info: ['#7aa2f7', 'rgba(122,162,247,.13)'],
+  warn: ['#f5a524', 'rgba(245,165,36,.13)'],
+  error: ['#f5455c', 'rgba(245,69,92,.13)'],
+};
+
+export const ROUTE_TITLES = {
+  dashboard: ['Dashboard', 'overview · all niches'],
+  niches: ['Niches', 'select & configure the niches you post in'],
+  queue: ['Queue', 'generated_posts pipeline'],
+  history: ['History', 'post_history & cost'],
+  sources: ['Sources', 'static & dynamic ingestion'],
+  rawdata: ['Raw Data', 'raw fetched content_items'],
+  schedule: ['Schedule', 'resolved posting slots'],
+  logs: ['Logs', 'live service tail'],
+  settings: ['Settings', 'safety & credentials'],
+};

@@ -3,35 +3,49 @@
   "display_name": "Finance",
   "enabled": true,
   "filters": {
-    "blocklist": ["get rich quick", "hot stock tip", "guaranteed returns", "nsfw"],
-    "relevance_keywords": ["stock", "market", "earnings", "fed", "rates", "inflation", "economy", "shares", "revenue", "ipo", "treasury", "nasdaq", "s&p", "dividend"],
+    "blocklist": [
+      "get rich quick",
+      "hot stock tip",
+      "guaranteed returns",
+      "nsfw"
+    ],
+    "relevance_keywords": [
+      "stock",
+      "market",
+      "earnings",
+      "fed",
+      "rates",
+      "inflation",
+      "economy",
+      "shares",
+      "revenue",
+      "ipo",
+      "treasury",
+      "nasdaq",
+      "s&p",
+      "dividend"
+    ],
     "relevance_threshold": 1,
     "max_age_days": 3,
     "dup_threshold": 0.8,
     "dup_window_days": 2
   },
   "prioritization": {
-    "recency_weight": 0.6,
-    "engagement_weight": 0.25,
-    "sentiment_weight": 0.15,
+    "recency_weight": 0.5,
+    "engagement_weight": 0.2,
+    "relevance_weight": 0.2,
+    "sentiment_weight": 0.1,
     "half_life_hours": 12
   },
   "sources": {
     "yfinance": {
-      "symbols": ["AAPL", "MSFT", "TSLA", "BTC-USD"],
+      "symbols": [
+        "AAPL",
+        "MSFT",
+        "TSLA",
+        "BTC-USD"
+      ],
       "limit": 10
-    },
-    "rss": {
-      "category": "finance",
-      "feeds": [
-        "https://feeds.marketwatch.com/marketwatch/topstories/",
-        "https://feeds.marketwatch.com/marketwatch/marketpulse/"
-      ]
-    },
-    "finnhub": {
-      "enabled": false,
-      "category": "general",
-      "limit": 30
     }
   }
 }

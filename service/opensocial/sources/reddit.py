@@ -1,22 +1,43 @@
-"""Reddit source via asyncpraw (read-only; app credentials required).
+"""Reddit source via the public Atom feeds (no key required).
+
+Reddit blocks unauthenticated access to the ``.json`` listing endpoints with a
+403 anti-bot page, but the equivalent ``.rss`` (Atom) feeds remain open. We
+fetch ``/r/<sub>/<sort>/.rss`` per subreddit and parse it with feedparser.
+
+Tradeoff vs. the OAuth API: Atom feeds carry the title, link, author, timestamp
+and post body, but **not** the score / comment counts, so ``engagement`` is
+left empty (prioritization simply treats those signals as absent).
 
     reddit:
       subreddits: [cryptocurrency, bitcoin]
       sort: hot              # hot | new | top | rising
       limit: 25
-      # client_id / client_secret (or env REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET)
-      # user_agent: optional override
+      time: day             # only for sort=top: hour | day | week | month | year | all
+
+Reddit rejects the default httpx/library User-Agent, so we send a browser-like
+one. Stay within ~10 subreddits per fetch to avoid the unauthenticated 429.
 """
 
 from __future__ import annotations
 
-import os
+import re
 from datetime import datetime, timezone
 
-from opensocial.core.models import ContentItem
-from opensocial.sources.base import USER_AGENT, Source, register
+import feedparser
+import httpx
 
-_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+from opensocial.core.models import ContentItem
+from opensocial.sources.base import DEFAULT_TIMEOUT, Source, register
+from opensocial.sources.rss import struct_to_dt
+
+_SORTS = {"hot", "new", "top", "rising"}
+# Reddit serves an anti-bot block page to library User-Agents; a browser UA
+# (plus the .rss path) is accepted for unauthenticated reads.
+_REDDIT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+_IMG_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.I)
 
 
 @register
@@ -25,64 +46,70 @@ class RedditSource(Source):
     category = "social"
 
     async def fetch(self) -> list[ContentItem]:
-        client_id = self.config.get("client_id") or os.environ.get("REDDIT_CLIENT_ID")
-        client_secret = self.config.get("client_secret") or os.environ.get(
-            "REDDIT_CLIENT_SECRET"
-        )
-        if not (client_id and client_secret):
-            raise RuntimeError(
-                "reddit requires client_id/client_secret (config or env "
-                "REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET)"
-            )
-
         subreddits: list[str] = self.config.get("subreddits", []) or []
         sort: str = self.config.get("sort", "hot")
+        if sort not in _SORTS:
+            sort = "hot"
         limit: int = int(self.config.get("limit", 25))
-        user_agent: str = self.config.get("user_agent", USER_AGENT)
+        time_filter: str = self.config.get("time", "day")
 
-        import asyncpraw
+        params: dict[str, str | int] = {"limit": limit}
+        if sort == "top":
+            params["t"] = time_filter
 
         items: list[ContentItem] = []
-        reddit = asyncpraw.Reddit(
-            client_id=client_id,
-            client_secret=client_secret,
-            user_agent=user_agent,
-        )
-        try:
-            reddit.read_only = True
+        async with httpx.AsyncClient(
+            timeout=DEFAULT_TIMEOUT,
+            headers={"User-Agent": _REDDIT_UA},
+            follow_redirects=True,
+        ) as client:
             for name in subreddits:
-                subreddit = await reddit.subreddit(name)
-                lister = getattr(subreddit, sort, subreddit.hot)
-                async for sub in lister(limit=limit):
-                    items.append(self._to_item(sub, name))
-        finally:
-            await reddit.close()
+                url = f"https://www.reddit.com/r/{name}/{sort}/.rss"
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                parsed = feedparser.parse(resp.content)
+                for entry in parsed.entries:
+                    item = self._to_item(entry, name)
+                    if item is not None:
+                        items.append(item)
         return items
 
-    def _to_item(self, sub, subreddit: str) -> ContentItem:
-        permalink = f"https://www.reddit.com{sub.permalink}"
-        external = getattr(sub, "url", "") or ""
-        media = [external] if external.lower().endswith(_IMAGE_EXTS) else []
+    def _to_item(self, entry, subreddit: str) -> ContentItem | None:
+        url = entry.get("link")
+        title = entry.get("title")
+        if not url or not title:
+            return None
+
+        body = None
+        contents = entry.get("content")
+        if contents:
+            body = contents[0].get("value")
+
+        media: list[str] = []
+        if body:
+            m = _IMG_RE.search(body)
+            if m and m.group(1).startswith("http"):
+                media.append(m.group(1))
+
+        author = entry.get("author")  # e.g. "/u/someone"
+        published = struct_to_dt(
+            entry.get("published_parsed") or entry.get("updated_parsed")
+        ) or datetime.now(timezone.utc)
+
         return ContentItem(
             source_name=self.name,
             source_category=self.category,
-            title=sub.title,
-            url=permalink,
-            body=(sub.selftext or None),
-            author=str(sub.author) if sub.author else None,
-            published_at=datetime.fromtimestamp(sub.created_utc, tz=timezone.utc),
+            title=title,
+            url=url,
+            body=body,
+            author=author,
+            published_at=published,
             media_urls=media,
             tags=[subreddit],
-            engagement={
-                "score": sub.score,
-                "comments": sub.num_comments,
-                "upvote_ratio": getattr(sub, "upvote_ratio", None),
-            },
+            engagement={},  # Atom feeds don't expose score / comment counts
             raw_metadata={
-                "id": sub.id,
+                "id": entry.get("id"),
                 "subreddit": subreddit,
-                "permalink": sub.permalink,
-                "external_url": external,
-                "over_18": getattr(sub, "over_18", None),
+                "permalink": url,
             },
         )

@@ -1,32 +1,45 @@
 {
   "slug": "business",
-  "display_name": "Business & Startups",
+  "display_name": "Business",
   "enabled": true,
   "filters": {
-    "blocklist": ["nsfw", "mlm", "get rich quick", "sponsored"],
-    "relevance_keywords": ["startup", "founder", "funding", "vc", "venture", "saas", "product", "growth", "revenue", "acquisition", "ipo", "strategy", "leadership", "market"],
+    "blocklist": [
+      "nsfw",
+      "mlm",
+      "get rich quick",
+      "sponsored"
+    ],
+    "relevance_keywords": [
+      "startup",
+      "founder",
+      "funding",
+      "vc",
+      "venture",
+      "saas",
+      "product",
+      "growth",
+      "revenue",
+      "acquisition",
+      "ipo",
+      "strategy",
+      "leadership",
+      "market"
+    ],
     "relevance_threshold": 1,
     "max_age_days": 10,
     "dup_threshold": 0.8,
     "dup_window_days": 5
   },
   "prioritization": {
-    "recency_weight": 0.45,
-    "engagement_weight": 0.4,
+    "recency_weight": 0.4,
+    "engagement_weight": 0.3,
+    "relevance_weight": 0.15,
     "sentiment_weight": 0.15,
     "half_life_hours": 36
   },
   "sources": {
-    "rss": {
-      "category": "business",
-      "feeds": [
-        "https://www.ycombinator.com/blog/rss",
-        "https://feeds.hbr.org/harvardbusiness",
-        "https://www.indiehackers.com/feed.xml"
-      ]
-    },
     "producthunt": {
-      "enabled": false,
+      "enabled": true,
       "limit": 20
     }
   }

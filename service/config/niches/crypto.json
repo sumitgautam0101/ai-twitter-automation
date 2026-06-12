@@ -3,45 +3,97 @@
   "display_name": "Crypto",
   "enabled": true,
   "filters": {
-    "blocklist": ["giveaway", "airdrop scam", "double your", "pump group", "guaranteed returns", "nsfw"],
-    "relevance_keywords": ["bitcoin", "btc", "ethereum", "eth", "crypto", "blockchain", "defi", "token", "stablecoin", "sec", "etf", "wallet", "exchange", "mining"],
+    "blocklist": [
+      "giveaway",
+      "airdrop scam",
+      "double your",
+      "pump group",
+      "guaranteed returns",
+      "nsfw"
+    ],
+    "relevance_keywords": [
+      "bitcoin",
+      "btc",
+      "ethereum",
+      "eth",
+      "crypto",
+      "blockchain",
+      "defi",
+      "token",
+      "stablecoin",
+      "sec",
+      "etf",
+      "wallet",
+      "exchange",
+      "mining"
+    ],
     "relevance_threshold": 1,
     "max_age_days": 3,
     "dup_threshold": 0.8,
     "dup_window_days": 2
   },
   "prioritization": {
-    "recency_weight": 0.6,
-    "engagement_weight": 0.3,
+    "recency_weight": 0.5,
+    "engagement_weight": 0.25,
+    "relevance_weight": 0.15,
     "sentiment_weight": 0.1,
     "half_life_hours": 12
   },
   "sources": {
-    "rss": {
-      "category": "crypto",
-      "feeds": [
-        "https://decrypt.co/feed",
-        "https://www.coindesk.com/arc/outboundfeeds/rss/",
-        "https://www.theblock.co/rss.xml"
-      ]
-    },
     "hackernews": {
       "query": "crypto",
       "limit": 30
     },
-    "gdelt": {
+    "googlenews": {
       "query": "cryptocurrency",
       "limit": 30
     },
     "medium": {
       "category": "crypto",
-      "tags": ["cryptocurrency", "bitcoin"]
+      "tags": [
+        "cryptocurrency",
+        "bitcoin"
+      ]
     },
     "reddit": {
-      "enabled": false,
-      "subreddits": ["cryptocurrency", "bitcoin"],
+      "enabled": true,
+      "subreddits": [
+        "cryptocurrency"
+      ],
       "sort": "hot",
       "limit": 15
     }
-  }
+  },
+  "persona": {
+    "instructions": "Always use 1-2 hashtags!"
+  },
+  "post_types": {
+    "news": {
+      "enabled": true
+    },
+    "spotlight": {
+      "enabled": false
+    },
+    "insight": {
+      "enabled": true
+    },
+    "take": {
+      "enabled": true
+    },
+    "tip": {
+      "enabled": false
+    },
+    "question": {
+      "enabled": true
+    },
+    "meme": {
+      "enabled": false
+    }
+  },
+  "independent_take": {
+    "enabled": false,
+    "per_day": 2,
+    "types": []
+  },
+  "image_source": "content"
 }

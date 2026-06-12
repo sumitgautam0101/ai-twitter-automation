@@ -15,9 +15,8 @@ from opensocial.sources.base import (  # noqa: F401
 from opensocial.sources import (  # noqa: F401,E402
     arxiv,
     devto,
-    finnhub,
-    gdelt,
     github_releases,
+    googlenews,
     guardian,
     hackernews,
     medium,

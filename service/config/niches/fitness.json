@@ -1,0 +1,51 @@
+{
+  "slug": "fitness",
+  "display_name": "Fitness",
+  "enabled": true,
+  "filters": {
+    "blocklist": [
+      "nsfw",
+      "fat burner pill",
+      "guaranteed abs",
+      "steroid source"
+    ],
+    "relevance_keywords": [
+      "workout",
+      "exercise",
+      "training",
+      "muscle",
+      "strength",
+      "cardio",
+      "gym",
+      "nutrition",
+      "recovery",
+      "reps",
+      "mobility",
+      "protein"
+    ],
+    "relevance_threshold": 1,
+    "max_age_days": 14,
+    "dup_threshold": 0.8,
+    "dup_window_days": 7
+  },
+  "prioritization": {
+    "recency_weight": 0.3,
+    "engagement_weight": 0.3,
+    "relevance_weight": 0.2,
+    "sentiment_weight": 0.2,
+    "half_life_hours": 48
+  },
+  "sources": {
+    "googlenews": {
+      "query": "fitness OR exercise",
+      "limit": 20
+    },
+    "medium": {
+      "category": "fitness",
+      "tags": [
+        "fitness",
+        "workout"
+      ]
+    }
+  }
+}

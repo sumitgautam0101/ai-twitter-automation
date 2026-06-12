@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from opensocial.core.models import ContentItem
 
 DEFAULT_TIMEOUT = 20.0
-USER_AGENT = "OpenSocial/0.1 (+https://github.com/opensocial)"
+USER_AGENT = "OpenX/0.1 (+https://github.com/openx)"
 
 
 def resolve_api_key(

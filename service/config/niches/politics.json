@@ -1,0 +1,50 @@
+{
+  "slug": "politics",
+  "display_name": "Politics",
+  "enabled": true,
+  "filters": {
+    "blocklist": [
+      "nsfw",
+      "clickbait",
+      "you won't believe",
+      "owned",
+      "destroys"
+    ],
+    "relevance_keywords": [
+      "election",
+      "senate",
+      "congress",
+      "president",
+      "policy",
+      "vote",
+      "government",
+      "bill",
+      "campaign",
+      "supreme court",
+      "parliament",
+      "legislation"
+    ],
+    "relevance_threshold": 1,
+    "max_age_days": 2,
+    "dup_threshold": 0.75,
+    "dup_window_days": 1
+  },
+  "prioritization": {
+    "recency_weight": 0.65,
+    "engagement_weight": 0.2,
+    "relevance_weight": 0.05,
+    "sentiment_weight": 0.1,
+    "half_life_hours": 8
+  },
+  "sources": {
+    "googlenews": {
+      "query": "politics OR election OR government",
+      "limit": 30
+    },
+    "guardian": {
+      "enabled": true,
+      "section": "politics",
+      "limit": 20
+    }
+  }
+}

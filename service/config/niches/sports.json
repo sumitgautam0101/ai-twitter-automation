@@ -1,0 +1,44 @@
+{
+  "slug": "sports",
+  "display_name": "Sports",
+  "enabled": true,
+  "filters": {
+    "blocklist": [
+      "nsfw",
+      "betting tips",
+      "fixed match",
+      "clickbait"
+    ],
+    "relevance_keywords": [
+      "game",
+      "match",
+      "championship",
+      "league",
+      "player",
+      "team",
+      "season",
+      "score",
+      "tournament",
+      "coach",
+      "playoff",
+      "transfer"
+    ],
+    "relevance_threshold": 1,
+    "max_age_days": 2,
+    "dup_threshold": 0.78,
+    "dup_window_days": 1
+  },
+  "prioritization": {
+    "recency_weight": 0.6,
+    "engagement_weight": 0.25,
+    "relevance_weight": 0.05,
+    "sentiment_weight": 0.1,
+    "half_life_hours": 8
+  },
+  "sources": {
+    "googlenews": {
+      "query": "sports",
+      "limit": 30
+    }
+  }
+}

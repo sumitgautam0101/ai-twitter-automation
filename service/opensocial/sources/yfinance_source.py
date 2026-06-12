@@ -6,9 +6,7 @@
 
 yfinance is synchronous, so the blocking call runs in a worker thread. Its
 news payload shape has changed across versions; both the legacy flat shape
-and the newer nested ``content`` shape are handled. Per project.md this
-source falls back to Finnhub when unavailable — wire that in alongside the
-scheduler once both are configured.
+and the newer nested ``content`` shape are handled.
 """
 
 from __future__ import annotations

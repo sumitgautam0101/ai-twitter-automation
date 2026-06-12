@@ -12,13 +12,12 @@ outlets), and each link in ``content_item_niches`` is marked ``candidate``,
 ``filtered``, or ``duplicate``.
 
 Finally, candidates are ordered into a queue by a weighted blend of recency,
-engagement, and how well their sentiment matches the niche's target — the
+relevance, and how well their sentiment matches the niche's target — the
 ordered hand-off to Phase 3 (post generation).
 """
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -68,10 +67,16 @@ class FilterConfig:
 
 @dataclass
 class PriorityConfig:
-    """Weights for ordering candidates, parsed from the niche's ``prioritization``."""
+    """Weights for ordering candidates, parsed from the niche's ``prioritization``.
+
+    Engagement was removed from the blend: most sources return no engagement
+    metrics (so the signal is usually 0), and where it exists it distorts
+    cross-source — an upvoted Reddit item would always outrank a metric-less
+    paper in the same niche. Any legacy ``engagement_weight`` key is ignored.
+    """
 
     recency_weight: float = 0.5
-    engagement_weight: float = 0.3
+    relevance_weight: float = 0.3
     sentiment_weight: float = 0.2
     half_life_hours: float = 24.0  # recency score halves every this many hours
     sentiment_target: float | None = None  # -1..1; None disables sentiment matching
@@ -82,7 +87,7 @@ class PriorityConfig:
         target = p.get("sentiment_target")
         return cls(
             recency_weight=float(p.get("recency_weight", 0.5)),
-            engagement_weight=float(p.get("engagement_weight", 0.3)),
+            relevance_weight=float(p.get("relevance_weight", 0.3)),
             sentiment_weight=float(p.get("sentiment_weight", 0.2)),
             half_life_hours=float(p.get("half_life_hours", 24.0)),
             sentiment_target=float(target) if target is not None else None,
@@ -215,17 +220,6 @@ def filter_niche(session: Session, niche_slug: str, raw_config: dict) -> dict[st
 # ---------------------------------------------------------------------------
 
 
-def _engagement_score(engagement: dict | None) -> float:
-    if not engagement:
-        return 0.0
-    total = 0.0
-    for key in ("score", "comments", "reactions", "upvotes", "downloads"):
-        value = engagement.get(key)
-        if isinstance(value, (int, float)):
-            total += float(value)
-    return total
-
-
 def _recency_score(published: datetime | None, now: datetime, half_life_hours: float) -> float:
     published = _as_utc(published)
     if published is None:
@@ -253,9 +247,10 @@ def candidate_queue(
 ) -> list[RankedCandidate]:
     """Return the niche's ``candidate`` items ordered best-first.
 
-    Score blends recency, engagement, and sentiment match (per
-    :class:`PriorityConfig`). Engagement is log-scaled and min-max normalized
-    across the candidate set so one viral item doesn't dwarf everything.
+    Score blends recency, relevance, and sentiment match (per
+    :class:`PriorityConfig`). Relevance reuses the keyword-hit score already
+    computed during filtering (stored on the niche link). Engagement is
+    deliberately not a factor — see :class:`PriorityConfig`.
     """
     cfg = PriorityConfig.from_niche(raw_config)
     now = datetime.now(timezone.utc)
@@ -271,28 +266,26 @@ def candidate_queue(
     if not rows:
         return []
 
-    raw_eng = [math.log1p(_engagement_score(row.engagement)) for _, row in rows]
-    eng_min, eng_max = min(raw_eng), max(raw_eng)
-    eng_span = eng_max - eng_min
-
     # If sentiment matching is disabled, redistribute its weight to the others.
-    w_rec, w_eng, w_sent = cfg.recency_weight, cfg.engagement_weight, cfg.sentiment_weight
-    if cfg.sentiment_target is None:
-        w_sent = 0.0
-    total_w = w_rec + w_eng + w_sent
+    w_rec = cfg.recency_weight
+    w_rel = cfg.relevance_weight
+    w_sent = 0.0 if cfg.sentiment_target is None else cfg.sentiment_weight
+    total_w = w_rec + w_rel + w_sent
     if total_w <= 0:
-        w_rec, w_eng, total_w = 1.0, 0.0, 1.0
+        w_rec, total_w = 1.0, 1.0
 
     ranked: list[RankedCandidate] = []
-    for (link, row), eng_log in zip(rows, raw_eng):
+    for link, row in rows:
         recency = _recency_score(row.published_at, now, cfg.half_life_hours)
-        engagement = (eng_log - eng_min) / eng_span if eng_span > 0 else 0.0
+        relevance = link.relevance_score or 0.0
         sentiment = _sentiment_score(row.sentiment, cfg.sentiment_target)
-        priority = (w_rec * recency + w_eng * engagement + w_sent * sentiment) / total_w
+        priority = (
+            w_rec * recency + w_rel * relevance + w_sent * sentiment
+        ) / total_w
         ranked.append(
             RankedCandidate(
                 row=row,
-                relevance_score=link.relevance_score or 0.0,
+                relevance_score=relevance,
                 priority_score=round(priority, 4),
             )
         )

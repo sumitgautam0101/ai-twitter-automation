@@ -1,0 +1,572 @@
+"""Dashboard HTTP API tests (FastAPI TestClient — no server, no network).
+
+Covers the runtime-settings overlay, the read endpoints' shapes, the approval
+transitions over HTTP, niche config + schedule writes, source toggles, the
+command queue, and credential storage (env secrets + X account enrollment).
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+from opensocial.api import create_app, inject_stored_secrets
+from opensocial.core.db import insert_generated_post, store_items
+from opensocial.core.models import ContentItem
+from opensocial.core.settings import resolve_settings
+
+NICHE = "tech"
+
+NICHE_CONFIG = {
+    "slug": NICHE,
+    "display_name": "Technology",
+    "enabled": True,
+    "persona": {"voice": "test voice"},
+    "post_types": {"news": {"enabled": True}},
+    "schedule": {
+        "windows": [["09:00", "12:00"]],
+        "posts_per_day": [2, 2],
+        "min_gap_minutes": 30,
+    },
+    "sources": {"hackernews": {"limit": 5}},
+}
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    monkeypatch.delenv("POST_DRY_RUN", raising=False)
+    monkeypatch.delenv("APP_MODE", raising=False)
+    monkeypatch.delenv("OPENSOCIAL_SECRET_KEY", raising=False)
+    monkeypatch.setenv("OPENSOCIAL_KEYFILE", str(tmp_path / "test.key"))
+    config_dir = tmp_path / "niches"
+    config_dir.mkdir()
+    (config_dir / f"{NICHE}.json").write_text(json.dumps(NICHE_CONFIG))
+    app = create_app(tmp_path / "test.db", config_dir)
+    return TestClient(app)
+
+
+def _add_post(client, **over):
+    sf = client.app.state.session_factory
+    with sf() as s:
+        post = insert_generated_post(
+            s,
+            niche_slug=over.pop("niche_slug", NICHE),
+            post_type=over.pop("post_type", "news"),
+            text=over.pop("text", "a test post"),
+            ai_text_provider="template",
+            **over,
+        )
+        s.commit()
+        return post.id
+
+
+# --- status & runtime settings --------------------------------------------
+
+
+def test_status_defaults_fail_safe(client):
+    body = client.get("/api/status").json()
+    assert body["dry_run"] is True  # fail-safe: dry unless explicitly off
+    assert body["app_mode"] == "manual"
+    assert body["published_today"] == 0
+
+
+def test_settings_patch_persists_and_resolves(client):
+    body = client.patch(
+        "/api/settings", json={"dry_run": False, "app_mode": "auto"}
+    ).json()
+    assert body["dry_run"] is False and body["app_mode"] == "auto"
+
+    # the worker resolves the same values from the DB
+    with client.app.state.session_factory() as s:
+        settings = resolve_settings(s)
+    assert settings.dry_run is False and settings.app_mode == "auto"
+
+
+def test_settings_patch_rejects_bad_mode(client):
+    assert client.patch("/api/settings", json={"app_mode": "yolo"}).status_code == 422
+
+
+def test_global_daily_cap_is_configurable(client):
+    body = client.patch("/api/settings", json={"global_daily_cap": 7}).json()
+    assert body["global_daily_cap"] == 7
+    # resolved from the DB overlay, not just the env default
+    with client.app.state.session_factory() as s:
+        assert resolve_settings(s).global_daily_cap == 7
+    # negatives are rejected
+    assert client.patch("/api/settings", json={"global_daily_cap": -1}).status_code == 422
+
+
+# --- posts & lifecycle transitions -----------------------------------------
+
+
+def test_posts_list_and_transitions(client):
+    pid = _add_post(client, status="draft")
+
+    posts = client.get("/api/posts").json()
+    assert [p["id"] for p in posts] == [pid]
+    assert posts[0]["status"] == "draft"
+    assert posts[0]["independent"] is True
+
+    # edit keeps the post a publishable draft; reject is terminal.
+    body = client.post(f"/api/posts/{pid}/edit", json={"text": "better text"}).json()
+    assert body["status"] == "draft" and body["text"] == "better text"
+    assert client.post(f"/api/posts/{pid}/reject").json()["status"] == "rejected"
+    assert client.post("/api/posts/nope/reject").status_code == 404
+
+
+def test_posts_filter_by_niche_and_status(client):
+    _add_post(client, status="draft")
+    _add_post(client, status="rejected")
+    assert len(client.get("/api/posts?status=draft").json()) == 1
+    assert len(client.get("/api/posts?status=rejected").json()) == 1
+    assert len(client.get(f"/api/posts?niche={NICHE}").json()) == 2
+    assert client.get("/api/posts?niche=other").json() == []
+
+
+# --- raw fetched content ----------------------------------------------------
+
+
+def _store_item(client, **over):
+    item = ContentItem(
+        source_name=over.pop("source_name", "hackernews"),
+        source_category=over.pop("source_category", "tech"),
+        title=over.pop("title", "A fetched story"),
+        url=over.pop("url", "https://example.com/a"),
+        published_at=over.pop("published_at", __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        )),
+        engagement=over.pop("engagement", {"score": 42}),
+        raw_metadata=over.pop("raw_metadata", {"objectID": "1"}),
+        **over,
+    )
+    with client.app.state.session_factory() as s:
+        store_items(s, [item], over.get("niche_slug", NICHE))
+    return item
+
+
+def test_content_returns_raw_items(client):
+    _store_item(client, title="Hello world", raw_metadata={"objectID": "9"})
+    body = client.get("/api/content").json()
+    assert body["total"] == 1
+    assert len(body["items"]) == 1
+    row = body["items"][0]
+    assert row["source"] == "hackernews"
+    assert row["title"] == "Hello world"
+    assert row["raw_metadata"] == {"objectID": "9"}
+    assert row["engagement"] == {"score": 42}
+    assert {n["niche"] for n in row["niches"]} == {NICHE}
+
+
+def test_content_filters(client):
+    _store_item(client, source_name="hackernews", url="https://example.com/hn", title="HN item")
+    _store_item(client, source_name="reddit", url="https://example.com/rd", title="Reddit item")
+    assert client.get("/api/content").json()["total"] == 2
+    assert client.get("/api/content?source=reddit").json()["total"] == 1
+    assert client.get("/api/content?niche=other").json()["total"] == 0
+    assert client.get("/api/content?q=reddit").json()["total"] == 1
+    # comma-separated niche list: a real slug plus a bogus one still matches.
+    assert client.get(f"/api/content?niche={NICHE},nope").json()["total"] == 2
+    assert client.get("/api/content?niche=nope,alsonope").json()["total"] == 0
+
+
+def test_content_paginates(client):
+    for i in range(5):
+        _store_item(client, url=f"https://example.com/{i}", title=f"Item {i}")
+    page1 = client.get("/api/content?limit=2&offset=0").json()
+    assert page1["total"] == 5
+    assert len(page1["items"]) == 2
+    page3 = client.get("/api/content?limit=2&offset=4").json()
+    assert page3["total"] == 5
+    assert len(page3["items"]) == 1
+    # offsets across pages return disjoint rows
+    seen = {r["id"] for r in page1["items"]} | {r["id"] for r in page3["items"]}
+    assert len(seen) == 3
+
+
+# --- overview / schedule ----------------------------------------------------
+
+
+def test_overview_shape(client):
+    _add_post(client, status="draft")
+    client.put("/api/niches/followed", json={"slugs": [NICHE]})
+    client.patch("/api/sources/hackernews", json={"enabled": True})  # funnel needs an enabled source
+    body = client.get("/api/overview").json()
+    assert body["pending_total"] == 1
+    funnel = {f["slug"]: f for f in body["funnel"]}
+    assert NICHE in funnel
+
+
+def test_overview_source_count_is_all_plugins(client):
+    """sources_total counts every installed plugin, not just niche-referenced ones."""
+    from opensocial.sources import available_sources
+
+    body = client.get("/api/overview").json()
+    total = len(available_sources())
+    assert body["sources_total"] == total
+    # Fresh DB → every source starts disabled until the user enables one.
+    assert body["sources_active"] == 0
+
+
+def test_overview_funnel_hides_untracked_niches(client, tmp_path):
+    # selected niche with no sources → excluded (nothing ingesting)
+    (tmp_path / "niches" / "empty.json").write_text(
+        json.dumps({"slug": "empty", "display_name": "Empty", "enabled": True, "sources": {}})
+    )
+    # selected niche with no enabled sources (source explicitly disabled) → excluded
+    (tmp_path / "niches" / "dead.json").write_text(
+        json.dumps({"slug": "dead", "display_name": "Dead", "enabled": True,
+                    "sources": {"hackernews": {"enabled": False}}})
+    )
+    # a niche with a good source but NOT selected → excluded (selection gates)
+    (tmp_path / "niches" / "off.json").write_text(
+        json.dumps({"slug": "off", "display_name": "Off", "enabled": True,
+                    "sources": {"hackernews": {"limit": 5}}})
+    )
+    client.put("/api/niches/followed", json={"slugs": [NICHE, "empty", "dead"]})
+    client.patch("/api/sources/hackernews", json={"enabled": True})  # enable the shared source
+    slugs = {f["slug"] for f in client.get("/api/overview").json()["funnel"]}
+    assert NICHE in slugs        # selected + has enabled source → shown
+    assert "empty" not in slugs  # selected but no sources
+    assert "dead" not in slugs   # selected but source explicitly off
+    assert "off" not in slugs    # has source but not selected
+
+
+def test_schedule_resolves_slots(client):
+    body = client.get("/api/schedule").json()
+    lane = next(n for n in body["niches"] if n["slug"] == NICHE)
+    assert lane["posts_per_day"] == [2, 2]
+    assert len(lane["slots"]) == 2  # fixed range resolves exactly 2 slots
+    assert lane["windows"] == [["09:00", "12:00"]]
+
+
+def test_schedule_put_writes_config(client, tmp_path):
+    res = client.put(
+        f"/api/niches/{NICHE}/schedule",
+        json={"windows": [["08:00", "10:00"]], "posts_per_day": [1, 4], "min_gap_minutes": 50},
+    )
+    assert res.status_code == 200
+    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
+    assert on_disk["schedule"]["windows"] == [["08:00", "10:00"]]
+    assert on_disk["schedule"]["posts_per_day"] == [1, 4]
+    # bad window format rejected
+    assert client.put(
+        f"/api/niches/{NICHE}/schedule",
+        json={"windows": [["8am", "10"]], "posts_per_day": [1, 2], "min_gap_minutes": 5},
+    ).status_code == 422
+
+
+def test_schedule_only_includes_scheduled_niches(client, tmp_path):
+    # Dropping the schedule block takes the niche off the schedule entirely.
+    res = client.delete(f"/api/niches/{NICHE}/schedule")
+    assert res.status_code == 200
+    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
+    assert "schedule" not in on_disk
+    body = client.get("/api/schedule").json()
+    assert all(n["slug"] != NICHE for n in body["niches"])
+
+
+def test_randomize_splits_total_across_scheduled(client, tmp_path):
+    res = client.post(
+        "/api/schedule/randomize",
+        json={"window": ["08:00", "20:00"], "total_posts": 7, "min_gap_minutes": 30},
+    )
+    assert res.status_code == 200
+    lanes = res.json()["niches"]
+    # Single scheduled niche → it receives the whole total.
+    total = sum(lane["posts_per_day"][0] for lane in lanes)
+    assert total == 7
+    lane = next(n for n in lanes if n["slug"] == NICHE)
+    assert lane["windows"] == [["08:00", "20:00"]]
+    assert lane["posts_per_day"][0] == lane["posts_per_day"][1]  # exact share
+    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
+    assert on_disk["schedule"]["min_gap_minutes"] == 30
+    # bad time range rejected
+    assert client.post(
+        "/api/schedule/randomize",
+        json={"window": ["20:00", "08:00"], "total_posts": 3},
+    ).status_code == 422
+
+
+def test_randomize_requires_scheduled_niche(client):
+    client.delete(f"/api/niches/{NICHE}/schedule")
+    res = client.post("/api/schedule/randomize", json={"window": ["09:00", "18:00"], "total_posts": 4})
+    assert res.status_code == 400
+
+
+def test_niche_put_roundtrip(client, tmp_path):
+    cfg = client.get(f"/api/niches/{NICHE}").json()
+    cfg["persona"]["voice"] = "new voice"
+    assert client.put(f"/api/niches/{NICHE}", json=cfg).status_code == 200
+    assert client.get(f"/api/niches/{NICHE}").json()["persona"]["voice"] == "new voice"
+    # slug mismatch rejected
+    cfg["slug"] = "other"
+    assert client.put(f"/api/niches/{NICHE}", json=cfg).status_code == 422
+
+
+# --- sources -----------------------------------------------------------------
+
+
+def test_sources_list_and_toggle(client):
+    sources = client.get("/api/sources").json()
+    hn = next(s for s in sources if s["id"] == "hackernews")
+    assert hn["enabled"] is False and NICHE in hn["niches"]  # fresh DB → disabled
+
+    # enable, confirm, then disable again
+    assert client.patch("/api/sources/hackernews", json={"enabled": True}).json()["enabled"] is True
+    sources = client.get("/api/sources").json()
+    assert next(s for s in sources if s["id"] == "hackernews")["enabled"] is True
+    assert client.patch("/api/sources/hackernews", json={"enabled": False}).json()["enabled"] is False
+    assert client.patch("/api/sources/nope", json={"enabled": True}).status_code == 404
+
+
+def test_upcoming_source_is_flagged_and_locked(client):
+    sources = {s["id"]: s for s in client.get("/api/sources").json()}
+    yt = sources["youtube"]
+    assert yt["upcoming"] is True
+    # an upcoming source can't be enabled, and stays disabled
+    assert client.patch("/api/sources/youtube", json={"enabled": True}).status_code == 409
+    yt = next(s for s in client.get("/api/sources").json() if s["id"] == "youtube")
+    assert yt["enabled"] is False
+    # disabling (the no-op direction) is still allowed
+    assert client.patch("/api/sources/youtube", json={"enabled": False}).status_code == 200
+
+
+def test_sources_static_vs_dynamic(client):
+    sources = {s["id"]: s for s in client.get("/api/sources").json()}
+    # static: fixed origin, no add-origin affordance
+    assert sources["hackernews"]["kind"] == "static"
+    assert sources["hackernews"]["origin_label"] is None
+    # dynamic: carries an origin label + (empty) origins list
+    assert sources["reddit"]["kind"] == "dynamic"
+    assert sources["reddit"]["origin_label"]
+    assert sources["reddit"]["origins"] == []
+    assert sources["hackernews"]["category"] == "tech"
+
+
+def test_origin_add_and_remove_roundtrip(client, tmp_path):
+    # add a subreddit origin to the tech niche from a full reddit URL
+    res = client.post(
+        "/api/sources/reddit/origins",
+        json={"niche": NICHE, "url": "https://www.reddit.com/r/programming/"},
+    )
+    assert res.status_code == 200 and res.json()["value"] == "programming"
+
+    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
+    assert on_disk["sources"]["reddit"]["subreddits"] == ["programming"]
+    # block seeded with sensible defaults
+    assert on_disk["sources"]["reddit"]["sort"] == "hot"
+
+    # it surfaces as an origin on the source listing
+    reddit = next(s for s in client.get("/api/sources").json() if s["id"] == "reddit")
+    assert reddit["origins"] == [
+        {"niche": NICHE, "value": "programming", "display": "r/programming"}
+    ]
+
+    # edit the origin in place (new subreddit, same niche)
+    edited = client.put(
+        "/api/sources/reddit/origins",
+        json={"niche": NICHE, "value": "programming", "url": "r/rust"},
+    )
+    assert edited.status_code == 200 and edited.json()["value"] == "rust"
+    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
+    assert on_disk["sources"]["reddit"]["subreddits"] == ["rust"]
+
+    # removing the last origin drops the empty source block
+    assert client.request(
+        "DELETE", "/api/sources/reddit/origins",
+        json={"niche": NICHE, "value": "rust"},
+    ).status_code == 200
+    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
+    assert "reddit" not in on_disk["sources"]
+
+
+def test_origin_add_capped_at_max(client):
+    # fill reddit up to the 10-origin cap, then expect the 11th to be rejected
+    for i in range(10):
+        res = client.post(
+            "/api/sources/reddit/origins",
+            json={"niche": NICHE, "url": f"r/sub{i}"},
+        )
+        assert res.status_code == 200
+    reddit = next(s for s in client.get("/api/sources").json() if s["id"] == "reddit")
+    assert len(reddit["origins"]) == 10
+    assert reddit["max_origins"] == 10
+
+    over = client.post(
+        "/api/sources/reddit/origins", json={"niche": NICHE, "url": "r/onemore"}
+    )
+    assert over.status_code == 422
+    # editing an existing origin still works at the cap (remove + re-add nets even)
+    assert client.put(
+        "/api/sources/reddit/origins",
+        json={"niche": NICHE, "value": "sub0", "url": "r/renamed"},
+    ).status_code == 200
+
+
+def test_origin_rejects_unparseable_and_non_dynamic(client):
+    # static source has no origins endpoint
+    assert client.post(
+        "/api/sources/hackernews/origins", json={"niche": NICHE, "url": "x"}
+    ).status_code == 404
+    # garbage that yields no subreddit
+    assert client.post(
+        "/api/sources/reddit/origins", json={"niche": NICHE, "url": "https://reddit.com/"}
+    ).status_code == 422
+
+
+# --- global AI config --------------------------------------------------------
+
+
+def test_ai_config_default_and_put(client):
+    body = client.get("/api/ai").json()
+    assert body["text"]["provider"] == "local"
+    # AI image generation was removed — config is text-only now.
+    assert "image" not in body
+    # key presence is surfaced for the inline key fields
+    assert set(body["key_status"]) == {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
+
+    saved = client.put(
+        "/api/ai",
+        json={"text": {"provider": "template", "model": "gpt-4o-mini"}},
+    ).json()
+    assert saved["text"]["provider"] == "template"
+    assert saved["text"]["model"] == "gpt-4o-mini"
+    # unspecified fields fall back to defaults
+    assert saved["text"]["temperature"] == 0.7
+    assert "image" not in saved
+
+
+def test_ai_local_provider_requires_endpoint(client):
+    # local provider with a blank endpoint is rejected
+    res = client.put(
+        "/api/ai",
+        json={"text": {"provider": "local", "endpoint": ""}},
+    )
+    assert res.status_code == 422
+    # with an endpoint it saves fine
+    ok = client.put(
+        "/api/ai",
+        json={"text": {"provider": "local", "endpoint": "http://localhost:11434"}},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["text"]["endpoint"] == "http://localhost:11434"
+
+
+# --- commands -----------------------------------------------------------------
+
+
+def test_command_enqueue_and_poll(client):
+    row = client.post(
+        "/api/commands", json={"type": "generate_posts", "payload": {"niche": NICHE}}
+    ).json()
+    assert row["status"] == "pending"
+    fetched = client.get(f"/api/commands?ids={row['id']}").json()
+    assert fetched[0]["type"] == "generate_posts"
+    assert client.post("/api/commands", json={"type": "rm -rf"}).status_code == 422
+
+
+# --- credentials -----------------------------------------------------------------
+
+
+def test_env_secret_set_encrypted_and_injected(client, tmp_path, monkeypatch):
+    monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)
+    assert client.post(
+        "/api/credentials", json={"key": "GUARDIAN_API_KEY", "value": "sek-123"}
+    ).json()["set"] is True
+    # keyfile auto-created; value encrypted in app_settings, env updated
+    assert (tmp_path / "test.key").exists()
+    import os
+
+    assert os.environ["GUARDIAN_API_KEY"] == "sek-123"
+
+    groups = client.get("/api/credentials").json()
+    guardian = next(g for g in groups if g["platform"] == "The Guardian")
+    assert guardian["keys"][0]["set"] is True
+
+    # unknown env names rejected
+    assert client.post(
+        "/api/credentials", json={"key": "PATH", "value": "x"}
+    ).status_code == 422
+
+    # a fresh process re-injects from the DB
+    monkeypatch.delenv("GUARDIAN_API_KEY")
+    assert inject_stored_secrets(client.app.state.session_factory) == 1
+    assert os.environ["GUARDIAN_API_KEY"] == "sek-123"
+    monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)
+
+
+def test_x_account_enroll(client):
+    body = client.post(
+        "/api/credentials/x",
+        json={
+            "label": "main",
+            "api_key": "k", "api_secret": "s",
+            "access_token": "t", "access_token_secret": "ts",
+        },
+    ).json()
+    assert body["set"] is True
+    groups = client.get("/api/credentials").json()
+    x = next(g for g in groups if g["type"] == "x_account")
+    assert x["accounts"] == ["main"] and all(k["set"] for k in x["keys"])
+
+
+def test_reset_requires_confirm(client):
+    _add_post(client, status="draft")
+    assert client.post("/api/reset", json={"confirm": False}).status_code == 422
+    # data survives a rejected reset
+    assert client.get("/api/overview").json()["pending_total"] == 1
+
+
+def test_reset_clears_data_keeps_credentials(client, monkeypatch):
+    monkeypatch.setenv("GUARDIAN_API_KEY", "sek-keep")
+    client.post("/api/credentials", json={"key": "GUARDIAN_API_KEY", "value": "sek-keep"})
+    _add_post(client, status="draft")
+
+    body = client.post("/api/reset", json={"confirm": True}).json()
+    assert body["ok"] is True and body["cleared_credentials"] is False
+    assert body["deleted"]["generated_posts"] == 1
+    assert client.get("/api/overview").json()["pending_total"] == 0
+    # credentials untouched unless explicitly cleared
+    assert inject_stored_secrets(client.app.state.session_factory) >= 0
+    creds = client.get("/api/credentials").json()
+    guardian = next(g for g in creds if g["platform"] == "The Guardian")
+    assert all(k["set"] for k in guardian["keys"])
+
+
+def test_reset_clears_selected_niches_and_sources(client):
+    # turn things on, then reset → everything back to the fresh-DB baseline
+    client.put("/api/niches/followed", json={"slugs": [NICHE]})
+    client.patch("/api/sources/hackernews", json={"enabled": True})
+
+    body = client.post("/api/reset", json={"confirm": True}).json()
+    assert body["deleted"].get("followed_niches") == 1
+
+    assert client.get("/api/niches/followed").json()["followed"] == []
+    hn = next(s for s in client.get("/api/sources").json() if s["id"] == "hackernews")
+    assert hn["enabled"] is False
+    assert client.get("/api/overview").json()["setup"]["needs_setup"] is True
+
+
+def test_reset_clear_credentials_wipes_secrets(client, monkeypatch):
+    monkeypatch.setenv("GUARDIAN_API_KEY", "sek-gone")
+    client.post("/api/credentials", json={"key": "GUARDIAN_API_KEY", "value": "sek-gone"})
+    client.post(
+        "/api/credentials/x",
+        json={"label": "main", "api_key": "k", "api_secret": "s",
+              "access_token": "t", "access_token_secret": "ts"},
+    )
+
+    body = client.post(
+        "/api/reset", json={"confirm": True, "clear_credentials": True}
+    ).json()
+    assert body["cleared_credentials"] is True
+
+    creds = client.get("/api/credentials").json()
+    guardian = next(g for g in creds if g["platform"] == "The Guardian")
+    assert not any(k["set"] for k in guardian["keys"])
+    x = next(g for g in creds if g["type"] == "x_account")
+    assert x["accounts"] == []
+    # nothing left to re-inject from the DB
+    assert inject_stored_secrets(client.app.state.session_factory) == 0

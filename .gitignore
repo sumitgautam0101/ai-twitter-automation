@@ -2,15 +2,21 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
 .venv/
 venv/
 env/
 
-# OpenSocial
+# OpenX
 *.db
 *.db-journal
 *.sqlite
 .env
+opensocial.key
+
+# Node
+node_modules/
+dashboard/dist/
 
 # Editors / OS
 .vscode/

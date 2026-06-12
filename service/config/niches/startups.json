@@ -1,0 +1,56 @@
+{
+  "slug": "startups",
+  "display_name": "Startups",
+  "enabled": true,
+  "filters": {
+    "blocklist": [
+      "nsfw",
+      "mlm",
+      "get rich quick",
+      "sponsored",
+      "dm me"
+    ],
+    "relevance_keywords": [
+      "startup",
+      "founder",
+      "funding",
+      "seed",
+      "vc",
+      "venture",
+      "raise",
+      "product",
+      "mvp",
+      "growth",
+      "bootstrapped",
+      "acquisition"
+    ],
+    "relevance_threshold": 1,
+    "max_age_days": 10,
+    "dup_threshold": 0.8,
+    "dup_window_days": 5
+  },
+  "prioritization": {
+    "recency_weight": 0.4,
+    "engagement_weight": 0.3,
+    "relevance_weight": 0.15,
+    "sentiment_weight": 0.15,
+    "half_life_hours": 36
+  },
+  "sources": {
+    "hackernews": {
+      "query": "startup",
+      "limit": 30
+    },
+    "medium": {
+      "category": "startups",
+      "tags": [
+        "startup",
+        "entrepreneurship"
+      ]
+    },
+    "producthunt": {
+      "enabled": true,
+      "limit": 20
+    }
+  }
+}

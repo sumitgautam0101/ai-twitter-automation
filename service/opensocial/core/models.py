@@ -39,7 +39,7 @@ class ContentItem(BaseModel):
     media_urls: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     language: str = "en"
-    sentiment: float | None = None  # -1..1; populated only by GDELT today
+    sentiment: float | None = None  # -1..1; no shipped source populates it today
     engagement: dict | None = None  # shape varies per source
     raw_metadata: dict = Field(default_factory=dict)
 

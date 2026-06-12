@@ -1,0 +1,44 @@
+{
+  "slug": "entertainment",
+  "display_name": "Entertainment",
+  "enabled": true,
+  "filters": {
+    "blocklist": [
+      "nsfw",
+      "clickbait",
+      "you won't believe",
+      "leaked nudes"
+    ],
+    "relevance_keywords": [
+      "movie",
+      "film",
+      "tv",
+      "show",
+      "celebrity",
+      "music",
+      "streaming",
+      "netflix",
+      "box office",
+      "premiere",
+      "actor",
+      "album"
+    ],
+    "relevance_threshold": 1,
+    "max_age_days": 4,
+    "dup_threshold": 0.78,
+    "dup_window_days": 2
+  },
+  "prioritization": {
+    "recency_weight": 0.55,
+    "engagement_weight": 0.25,
+    "relevance_weight": 0.1,
+    "sentiment_weight": 0.1,
+    "half_life_hours": 12
+  },
+  "sources": {
+    "googlenews": {
+      "query": "entertainment OR celebrity OR movie",
+      "limit": 30
+    }
+  }
+}

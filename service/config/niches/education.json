@@ -1,0 +1,52 @@
+{
+  "slug": "education",
+  "display_name": "Education",
+  "enabled": true,
+  "filters": {
+    "blocklist": [
+      "nsfw",
+      "essay writing service",
+      "buy degree",
+      "clickbait"
+    ],
+    "relevance_keywords": [
+      "education",
+      "learning",
+      "students",
+      "school",
+      "university",
+      "teaching",
+      "curriculum",
+      "edtech",
+      "literacy",
+      "skills",
+      "classroom",
+      "tutoring"
+    ],
+    "relevance_threshold": 1,
+    "max_age_days": 14,
+    "dup_threshold": 0.8,
+    "dup_window_days": 5
+  },
+  "prioritization": {
+    "recency_weight": 0.35,
+    "engagement_weight": 0.3,
+    "relevance_weight": 0.15,
+    "sentiment_weight": 0.2,
+    "half_life_hours": 48
+  },
+  "sources": {
+    "googlenews": {
+      "query": "education",
+      "limit": 20
+    },
+    "medium": {
+      "category": "education",
+      "tags": [
+        "education",
+        "edtech"
+      ]
+    }
+  },
+  "image_source": "unsplash"
+}

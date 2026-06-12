@@ -1,0 +1,230 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  background: #0a0c0f;
+  color: #e7eaef;
+  font-family: 'Hanken Grotesk', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button {
+  font-family: inherit;
+}
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: #262c36;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+@keyframes os-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes os-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes os-toast {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.os-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+.os-card {
+  background: #111419;
+  border: 1px solid #1f242d;
+  border-radius: 12px;
+}
+@media (max-width: 1280px) {
+  .sched-split {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* ---- responsive layout grids (density / narrow windows) ----------------- */
+.os-grid-kpi {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.os-grid-main {
+  display: grid;
+  grid-template-columns: 1.7fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 1080px) {
+  .os-grid-main {
+    grid-template-columns: 1fr !important;
+  }
+}
+@media (max-width: 900px) {
+  .os-grid-kpi {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+@media (max-width: 540px) {
+  .os-grid-kpi {
+    grid-template-columns: 1fr !important;
+  }
+}
+/* tighten the outer page gutter on small viewports */
+@media (max-width: 720px) {
+  .os-page {
+    padding: 16px 14px 48px !important;
+  }
+}
+
+/* ---- Schedule tab ------------------------------------------------------- */
+@keyframes lane-open {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.lane-open {
+  animation: lane-open 0.18s ease;
+}
+.lane-row {
+  transition: background 0.12s;
+}
+.lane-row:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+.lane-caret {
+  transition: transform 0.18s ease, color 0.12s;
+}
+.lane-caret.open {
+  transform: rotate(90deg);
+}
+/* single styled range (min-gap) */
+input[type='range'].os-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: #1c222b;
+  outline: none;
+  cursor: pointer;
+}
+input[type='range'].os-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e7eaef;
+  border: 3px solid #3ecf8e;
+  cursor: grab;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+input[type='range'].os-range::-webkit-slider-thumb:active {
+  cursor: grabbing;
+}
+input[type='range'].os-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e7eaef;
+  border: 3px solid #3ecf8e;
+  cursor: grab;
+}
+.rng-thumb {
+  cursor: grab;
+  transition: box-shadow 0.12s, transform 0.08s;
+}
+.rng-thumb:hover {
+  transform: translate(-50%, -50%) scale(1.12);
+}
+.rng-thumb:active {
+  cursor: grabbing;
+}
+
+/* hover states (the DC prototype used style-hover) */
+.nav-btn:hover {
+  background: #161b22;
+  color: #e7eaef;
+}
+.nav-btn.active:hover {
+  background: #15201b;
+  color: #3ecf8e;
+}
+.hover-bright:hover {
+  filter: brightness(1.12);
+}
+.run-btn:hover {
+  background: #37b97e;
+}
+.hover-border:hover {
+  border-color: #2f3947 !important;
+}
+.hover-border-text:hover {
+  border-color: #2f3947 !important;
+  color: #cfd6df !important;
+}
+.hover-row:hover {
+  background: #10151b;
+}
+.hover-card:hover {
+  border-color: #2b3340 !important;
+}
+.x-action:hover {
+  color: var(--x-hover, #1d9bf0) !important;
+}
+.hover-opt:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.hover-lane:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.hover-danger:hover {
+  border-color: rgba(245, 69, 92, 0.4) !important;
+}
+.hover-green-btn:hover {
+  background: rgba(62, 207, 142, 0.18) !important;
+}
+.hover-add:hover {
+  border-color: #3ecf8e !important;
+  color: #3ecf8e !important;
+}
+.hover-remove:hover {
+  background: rgba(245, 69, 92, 0.1);
+}
+.hover-tab:hover {
+  background: #161b22;
+  color: #e7eaef;
+}
+.hover-tab.active:hover {
+  background: #15201b;
+  color: #3ecf8e;
+}

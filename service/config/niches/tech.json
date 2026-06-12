@@ -1,20 +1,98 @@
 {
   "slug": "tech",
-  "display_name": "Tech & Dev",
+  "display_name": "Technology",
   "enabled": true,
+  "persona": {
+    "voice": "You are a sharp, no-hype technologist who writes high-signal posts for developers and builders. Dry wit, concrete specifics, zero buzzwords.",
+    "style": "casual",
+    "length": "medium",
+    "instructions": "Write under 280 characters "
+  },
+  "ai": {
+    "text": {
+      "provider": "litellm",
+      "model": "ollama/llama3",
+      "temperature": 0.8
+    },
+    "image": {
+      "provider": "pollinations",
+      "width": 1024,
+      "height": 1024
+    }
+  },
   "filters": {
-    "blocklist": ["nsfw", "giveaway", "promo code", "sponsored"],
-    "relevance_keywords": ["ai", "ml", "model", "software", "developer", "code", "open source", "startup", "data", "cloud", "api", "release", "framework", "llm"],
+    "blocklist": [
+      "nsfw",
+      "giveaway",
+      "promo code",
+      "sponsored"
+    ],
+    "relevance_keywords": [
+      "ai",
+      "ml",
+      "model",
+      "software",
+      "developer",
+      "code",
+      "open source",
+      "startup",
+      "data",
+      "cloud",
+      "api",
+      "release",
+      "framework",
+      "llm"
+    ],
     "relevance_threshold": 1,
     "max_age_days": 7,
     "dup_threshold": 0.8,
     "dup_window_days": 3
   },
   "prioritization": {
-    "recency_weight": 0.5,
-    "engagement_weight": 0.35,
+    "recency_weight": 0.4,
+    "engagement_weight": 0.25,
+    "relevance_weight": 0.2,
     "sentiment_weight": 0.15,
     "half_life_hours": 24
+  },
+  "post_types": {
+    "news": {
+      "enabled": true
+    },
+    "spotlight": {
+      "enabled": true
+    },
+    "insight": {
+      "enabled": true
+    },
+    "take": {
+      "enabled": true
+    },
+    "tip": {
+      "enabled": true
+    },
+    "question": {
+      "enabled": true
+    },
+    "meme": {
+      "enabled": false
+    }
+  },
+  "independent_take": {
+    "enabled": true,
+    "per_day": 1,
+    "types": [
+      "take"
+    ],
+    "image": "ai"
+  },
+  "posting": {
+    "include_source_link": false
+  },
+  "approval": {
+    "required": false,
+    "timeout_minutes": 120,
+    "on_timeout": "discard"
   },
   "sources": {
     "hackernews": {
@@ -27,7 +105,11 @@
       "full_text": false
     },
     "github_releases": {
-      "repos": ["python/cpython", "openai/openai-python", "langchain-ai/langchain"],
+      "repos": [
+        "python/cpython",
+        "openai/openai-python",
+        "langchain-ai/langchain"
+      ],
       "limit": 5
     },
     "arxiv": {
@@ -36,10 +118,13 @@
     },
     "medium": {
       "category": "tech",
-      "tags": ["technology", "programming"]
+      "tags": [
+        "technology",
+        "programming"
+      ]
     },
     "producthunt": {
-      "enabled": false,
+      "enabled": true,
       "limit": 20
     },
     "youtube": {
@@ -48,11 +133,26 @@
       "limit": 5,
       "transcripts": true
     },
-    "reddit": {
-      "enabled": false,
-      "subreddits": ["technology", "programming"],
-      "sort": "hot",
-      "limit": 15
+    "rss": {
+      "category": "tech",
+      "feeds": [
+        "https://techcrunch.com/feed/",
+        "https://feeds.arstechnica.com/arstechnica/index"
+      ]
     }
+  },
+  "image_source": "content",
+  "schedule": {
+    "windows": [
+      [
+        "00:00",
+        "03:30"
+      ]
+    ],
+    "posts_per_day": [
+      9,
+      9
+    ],
+    "min_gap_minutes": 5
   }
 }

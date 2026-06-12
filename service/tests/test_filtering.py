@@ -107,19 +107,16 @@ def test_near_duplicate_respects_recent_window(session_factory):
 
 def test_queue_orders_by_priority(session_factory):
     now = datetime.now(timezone.utc)
+    # With equal relevance and no sentiment target, recency decides the order.
     items = [
-        _item("Old low-engagement story", published=now - timedelta(hours=48),
-              engagement={"score": 1}),
-        _item("Fresh viral story", published=now - timedelta(minutes=5),
-              engagement={"score": 5000}),
-        _item("Fresh quiet story", published=now - timedelta(minutes=10),
-              engagement={"score": 2}),
+        _item("Old story", published=now - timedelta(hours=48)),
+        _item("Freshest story", published=now - timedelta(minutes=5)),
+        _item("Fairly fresh story", published=now - timedelta(minutes=10)),
     ]
     config = {
         "filters": {"relevance_keywords": []},
         "prioritization": {
-            "recency_weight": 0.5,
-            "engagement_weight": 0.5,
+            "recency_weight": 1.0,
             "sentiment_weight": 0.0,
             "half_life_hours": 24,
         },
@@ -130,11 +127,43 @@ def test_queue_orders_by_priority(session_factory):
         filter_niche(session, NICHE, config)
         ranked = candidate_queue(session, NICHE, config)
 
-    assert [c.row.title for c in ranked][0] == "Fresh viral story"
+    assert [c.row.title for c in ranked][0] == "Freshest story"
     assert len(ranked) == 3
     # priority scores are sorted descending
     scores = [c.priority_score for c in ranked]
     assert scores == sorted(scores, reverse=True)
+
+
+def test_relevance_breaks_ties_in_queue(session_factory):
+    now = datetime.now(timezone.utc)
+    # Two items published at the same instant with no engagement signal, so
+    # recency and engagement are identical — relevance must decide the order.
+    items = [
+        _item("AI model open source release breakthrough", url="https://a.com/1",
+              published=now),
+        _item("AI thing", url="https://b.com/2", published=now),
+    ]
+    config = {
+        "filters": {
+            "relevance_keywords": ["ai", "model", "open source", "release"],
+            "relevance_threshold": 1,
+        },
+        "prioritization": {
+            "recency_weight": 0.4,
+            "engagement_weight": 0.0,
+            "relevance_weight": 0.6,
+            "sentiment_weight": 0.0,
+            "half_life_hours": 24,
+        },
+    }
+
+    with session_factory() as session:
+        store_items(session, items, NICHE)
+        filter_niche(session, NICHE, config)
+        ranked = candidate_queue(session, NICHE, config)
+
+    # The item hitting more relevance keywords ranks first.
+    assert ranked[0].row.title == "AI model open source release breakthrough"
 
 
 def test_sentiment_target_matching(session_factory):
