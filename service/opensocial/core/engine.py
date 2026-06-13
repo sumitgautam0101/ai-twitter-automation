@@ -36,6 +36,12 @@ from opensocial.publish.base import Publisher, estimate_cost, get_publisher
 # queue retired this is just "draft" — published/rejected/failed are terminal.
 ELIGIBLE_STATUSES = ("draft",)
 
+# How recently a slot must have come due to still publish. This is jitter
+# tolerance so a slot is caught on the tick(s) right after its time, NOT a
+# catch-up window — slots older than this are treated as missed and skipped, so
+# enabling autopilot mid-day never replays a backlog.
+SLOT_GRACE = timedelta(minutes=2)
+
 
 @dataclass
 class PublishOutcome:
@@ -172,11 +178,12 @@ def run_due_slots(
     publisher: Publisher | None = None,
     credentials: dict | None = None,
 ) -> list[PublishOutcome]:
-    """Publish the posts due for a niche at ``now`` (with catch-up).
+    """Publish the posts that just came due for a niche at ``now``.
 
-    No-op in ``manual`` app mode. Otherwise: how many slots are due minus how
-    many already went out today = the catch-up target, clamped by the global
-    daily cap and the minimum gap.
+    No-op in ``manual`` app mode. Otherwise the target is the number of slots
+    whose time fell within ``SLOT_GRACE`` of ``now`` — missed slots from earlier
+    are skipped, not caught up — clamped by the global daily cap and the minimum
+    gap.
     """
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
@@ -185,9 +192,7 @@ def run_due_slots(
 
     sched = ScheduleConfig.from_niche(config)
     slots = resolve_slots(sched, niche_slug, now)
-    due = due_slot_count(slots, now)
-    already = published_today_count(session, niche_slug=niche_slug, day=now)
-    target = max(0, due - already)
+    target = due_slot_count(slots, now, SLOT_GRACE)
     if target == 0:
         return []
 

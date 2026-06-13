@@ -121,10 +121,17 @@ def test_slots_differ_by_day():
     assert d1 != d2
 
 
-def test_due_slot_count_counts_past_slots():
+def test_due_slot_count_counts_recent_slots():
+    # Only slots inside the grace window (now - grace, now] count: an old missed
+    # slot and a future slot are both excluded.
     now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
-    slots = [now - timedelta(hours=2), now - timedelta(hours=1), now + timedelta(hours=1)]
-    assert due_slot_count(slots, now) == 2
+    grace = timedelta(minutes=2)
+    slots = [
+        now - timedelta(hours=2),    # missed: older than grace
+        now - timedelta(minutes=1),  # just due: inside grace
+        now + timedelta(hours=1),    # not yet due
+    ]
+    assert due_slot_count(slots, now, grace) == 1
 
 
 # --- cost model ----------------------------------------------------------
@@ -231,30 +238,51 @@ _ALL_DUE = {
 }
 
 
-def test_catch_up_publishes_due_slots(session_factory):
-    # All 3 slots are in the past, and there are 5 drafts available →
-    # exactly 3 (the due slots) should publish.
-    now = datetime.now(timezone.utc)
+def test_missed_slots_are_skipped(session_factory):
+    # All 3 slots are hours in the past (early-morning window) → none fall in the
+    # grace window, so nothing publishes: missed slots are not caught up.
+    now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
     with session_factory() as s:
         for i in range(5):
             _draft(s, ptype="news", score=i / 10)
         s.commit()
-        # No per-tone caps: the due-slot count (3) is the only limiter.
         cfg = {**_CONFIG, "schedule": _ALL_DUE}
         out = run_due_slots(s, NICHE, cfg, _auto(), now=now, publisher=_OkPublisher())
-        assert len(out) == 3
-        assert published_today_count(s, niche_slug=NICHE, day=now) == 3
+        assert out == []
+        assert published_today_count(s, niche_slug=NICHE, day=now) == 0
 
 
-def test_global_cap_caps_publishing(session_factory):
+def test_just_due_slot_publishes(session_factory, monkeypatch):
+    # A slot whose time landed seconds ago is inside the grace window → it
+    # publishes exactly once (highest-priority draft wins).
     now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        "opensocial.core.engine.resolve_slots",
+        lambda *a, **k: [now - timedelta(seconds=30)],
+    )
     with session_factory() as s:
         for i in range(5):
             _draft(s, ptype="news", score=i / 10)
         s.commit()
-        cfg = {**_CONFIG, "schedule": _ALL_DUE}
+        out = run_due_slots(s, NICHE, _CONFIG, _auto(), now=now, publisher=_OkPublisher())
+        assert len(out) == 1
+        assert published_today_count(s, niche_slug=NICHE, day=now) == 1
+
+
+def test_global_cap_caps_publishing(session_factory, monkeypatch):
+    # Three slots are within the grace window, but the global cap of 1 clamps the
+    # publish loop to a single post.
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        "opensocial.core.engine.resolve_slots",
+        lambda *a, **k: [now - timedelta(seconds=sec) for sec in (90, 60, 30)],
+    )
+    with session_factory() as s:
+        for i in range(5):
+            _draft(s, ptype="news", score=i / 10)
+        s.commit()
         out = run_due_slots(
-            s, NICHE, cfg, _auto(global_daily_cap=1), now=now, publisher=_OkPublisher()
+            s, NICHE, _CONFIG, _auto(global_daily_cap=1), now=now, publisher=_OkPublisher()
         )
         assert len(out) == 1  # global cap clamps below the 3 due slots
 

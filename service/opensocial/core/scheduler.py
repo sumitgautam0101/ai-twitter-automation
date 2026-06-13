@@ -109,7 +109,13 @@ def _offset_to_time(spans: list[tuple[datetime, datetime]], offset: float) -> da
     return spans[-1][1]
 
 
-def due_slot_count(slots: list[datetime], now: datetime) -> int:
-    """How many slots should have fired by ``now`` (the catch-up target)."""
+def due_slot_count(slots: list[datetime], now: datetime, grace: timedelta) -> int:
+    """Slots that came due within the last ``grace`` (no older catch-up).
+
+    A slot is "due now" only if its time fell inside ``(now - grace, now]``.
+    Slots older than that are treated as missed and skipped, so enabling
+    autopilot mid-day never replays a backlog.
+    """
     now = now.astimezone(timezone.utc)
-    return sum(1 for s in slots if s <= now)
+    lower = now - grace
+    return sum(1 for s in slots if lower < s <= now)

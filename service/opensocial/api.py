@@ -46,7 +46,7 @@ from opensocial.core.db import (
     source_statuses,
     upsert_source_status,
 )
-from opensocial.core.scheduler import ScheduleConfig, due_slot_count, resolve_slots
+from opensocial.core.scheduler import ScheduleConfig, resolve_slots
 from opensocial.core.settings import (
     get_followed_niches,
     load_ai_config,
@@ -708,7 +708,10 @@ def create_app(
                     continue
                 cfg = ScheduleConfig.from_niche(n.raw)
                 slots = resolve_slots(cfg, n.slug, now)
-                due = due_slot_count(slots, now)
+                # "due" here is purely informational for the schedule view: how
+                # many of today's slots have elapsed (the engine no longer catches
+                # these up — only slots that *just* came due publish).
+                due = sum(1 for t in slots if t <= now)
                 published = published_today_count(s, niche_slug=n.slug, day=now)
                 out.append(
                     {
