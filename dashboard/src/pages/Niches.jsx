@@ -13,9 +13,13 @@ import NicheEditor from '../components/NicheEditor';
 // /api/niches/followed; the open niche (settingsNiche) renders its config
 // editor right under its row, exactly like the Sources tab.
 export default function Niches() {
-  const { data: niches } = usePoll('/api/niches', 60000);
-  const { data: followedData, reload } = usePoll('/api/niches/followed', 0);
-  const { settingsNiche, setSettingsNiche, setNicheTab } = useApp();
+  const { settingsNiche, setSettingsNiche, setNicheTab, withWorkspace } = useApp();
+  const { data: allNiches } = usePoll('/api/niches', 60000);
+  const { data: followedData, reload } = usePoll(withWorkspace('/api/niches/followed'), 0);
+  // Niches are a shared catalog — every workspace sees all of them. Selection
+  // (followed) is per workspace, so two workspaces can select the same niche
+  // and each generates independently. No ownership filtering here.
+  const niches = useMemo(() => allNiches || [], [allNiches]);
 
   const [followed, setFollowed] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -34,7 +38,7 @@ export default function Niches() {
     setSaving(true);
     setError(null);
     api
-      .put('/api/niches/followed', { slugs: next })
+      .put(withWorkspace('/api/niches/followed'), { slugs: next })
       .then((res) => {
         setFollowed(res.followed || []);
         setSaving(false);

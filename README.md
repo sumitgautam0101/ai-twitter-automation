@@ -133,11 +133,12 @@ A key is like a password that lets OpenX use an outside service. You add all key
 
 You may want these keys:
 
-* **An AI key**, only if you chose a paid AI like Claude, ChatGPT, or Gemini.
+* **An AI key**, only if you chose a paid AI like Claude, ChatGPT, or Gemini. You add it on the **Settings** page.
+* **An image key (Unsplash)**, only if you want stock photos attached to posts. You add it on the **Settings** page, alongside your AI keys. Without it, topics set to use Unsplash photos simply post without an image.
 * **Source keys**, only for the few sources that need one. These are YouTube, Product Hunt, and The Guardian. Everything else works without a key.
 * **Your X account keys**, when you are ready to post for real (see below).
 
-To add a source key, open the **Sources** page, find the source, paste its key, turn the source on, and save.
+Your AI key, image key, and X account keys belong to the workspace you are in, so different workspaces can use different keys. To add a source key, open the **Sources** page, find the source, paste its key, turn the source on, and save (source keys are shared across all workspaces).
 
 ## Connecting your X account
 

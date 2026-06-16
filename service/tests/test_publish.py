@@ -89,7 +89,7 @@ class _FailPublisher(Publisher):
         return PublishResult(ok=False, error="boom")
 
 
-def _draft(session, *, ptype="news", score=1.0, independent=False):
+def _draft(session, *, ptype="news", score=1.0, independent=False, account_id=None):
     return insert_generated_post(
         session,
         niche_slug=NICHE,
@@ -98,6 +98,7 @@ def _draft(session, *, ptype="news", score=1.0, independent=False):
         ai_text_provider="template",
         content_item_id=None if independent else None,
         priority_score=score,
+        platform_account_id=account_id,
     )
 
 
@@ -152,6 +153,20 @@ def test_select_picks_highest_priority(session_factory):
         s.commit()
         chosen = select_post(s, NICHE, _CONFIG)
         assert chosen.id == best.id
+
+
+def test_select_post_is_scoped_to_workspace(session_factory):
+    # Niches are shared, so two workspaces can hold drafts for the same niche.
+    # A workspace must only ever publish its *own* draft — even when another
+    # workspace's draft for that niche has a higher priority score.
+    with session_factory() as s:
+        a = _draft(s, ptype="news", score=0.9, account_id="wsA")
+        b = _draft(s, ptype="news", score=0.5, account_id="wsB")
+        s.commit()
+        assert select_post(s, NICHE, _CONFIG, platform_account_id="wsB").id == b.id
+        assert select_post(s, NICHE, _CONFIG, platform_account_id="wsA").id == a.id
+        # Unscoped (legacy) selection still returns the global best.
+        assert select_post(s, NICHE, _CONFIG).id == a.id
 
 
 def test_select_is_priority_only_with_no_per_type_caps(session_factory):
@@ -269,22 +284,77 @@ def test_just_due_slot_publishes(session_factory, monkeypatch):
         assert published_today_count(s, niche_slug=NICHE, day=now) == 1
 
 
-def test_global_cap_caps_publishing(session_factory, monkeypatch):
-    # Three slots are within the grace window, but the global cap of 1 clamps the
-    # publish loop to a single post.
+def test_account_cap_caps_publishing(session_factory, monkeypatch):
+    # Three slots are within the grace window, but the account's per-account
+    # daily cap of 1 clamps the publish loop to a single post.
+    from opensocial.core.db import PlatformAccount
+
     now = datetime.now(timezone.utc)
     monkeypatch.setattr(
         "opensocial.core.engine.resolve_slots",
         lambda *a, **k: [now - timedelta(seconds=sec) for sec in (90, 60, 30)],
     )
     with session_factory() as s:
+        acct = PlatformAccount(
+            id="acct1", platform="x", account_label="a",
+            credentials_encrypted=b"x", daily_post_cap=1,
+        )
+        s.add(acct)
         for i in range(5):
-            _draft(s, ptype="news", score=i / 10)
+            _draft(s, ptype="news", score=i / 10, account_id="acct1")
         s.commit()
         out = run_due_slots(
-            s, NICHE, _CONFIG, _auto(global_daily_cap=1), now=now, publisher=_OkPublisher()
+            s, NICHE, _CONFIG, _auto(), now=now,
+            publisher=_OkPublisher(), account=acct,
         )
-        assert len(out) == 1  # global cap clamps below the 3 due slots
+        assert len(out) == 1  # per-account cap clamps below the 3 due slots
+        assert published_today_count(
+            s, platform_account_id="acct1", day=now
+        ) == 1
+
+
+def test_credential_less_account_publishes_dry_run_without_crashing(
+    session_factory, monkeypatch
+):
+    # A workspace created without enrolled X credentials has an empty
+    # ``credentials_encrypted``. Resolving credentials for it must not blow up
+    # (an empty blob used to raise Fernet ``InvalidToken`` and kill the worker
+    # tick) — it just stays dry-run and simulates the post.
+    from opensocial.core.db import PlatformAccount
+
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        "opensocial.core.engine.resolve_slots",
+        lambda *a, **k: [now - timedelta(seconds=30)],
+    )
+    cfg = {**_CONFIG, "account_id": "wsX"}
+    with session_factory() as s:
+        s.add(PlatformAccount(
+            id="wsX", platform="x", account_label="ws",
+            credentials_encrypted=b"",  # enrolled later — none yet
+        ))
+        _draft(s, ptype="news", score=0.9, account_id="wsX")
+        s.commit()
+        # No publisher/credentials injected → real resolution path runs.
+        out = run_due_slots(s, NICHE, cfg, _auto(dry_run=True), now=now)
+        assert len(out) == 1
+        assert out[0].ok and out[0].dry_run
+
+
+def test_decrypt_bad_blob_raises_secretserror_not_invalidtoken():
+    # decrypt_credentials must surface a catchable SecretsError on a key
+    # mismatch / garbage blob, never the raw cryptography InvalidToken.
+    from opensocial.core.secrets import (
+        SecretsError,
+        encrypt_credentials,
+        generate_key,
+    )
+
+    blob = encrypt_credentials({"k": "v"}, generate_key())
+    with pytest.raises(SecretsError):
+        from opensocial.core.secrets import decrypt_credentials
+
+        decrypt_credentials(blob, generate_key())  # different key
 
 
 # --- command bridge ------------------------------------------------------
@@ -313,3 +383,56 @@ def test_command_queue_runs_post_now(session_factory, tmp_path, monkeypatch):
         cmd = s.query(Command).one()
         assert cmd.status == "done"
         assert s.query(Log).count() >= 1  # log mirror populated
+
+
+# --- multi-account routing -----------------------------------------------
+
+
+def test_resolve_account_falls_back_to_sole_account(session_factory):
+    from opensocial.core.db import PlatformAccount
+    from opensocial.core.engine import resolve_account_for_niche
+
+    with session_factory() as s:
+        # No accounts → unassigned niche resolves to None.
+        assert resolve_account_for_niche(s, _CONFIG) is None
+        # Exactly one account → unassigned niche falls back to it.
+        s.add(PlatformAccount(
+            id="only", platform="x", account_label="only",
+            credentials_encrypted=b"x",
+        ))
+        s.commit()
+        assert resolve_account_for_niche(s, _CONFIG).id == "only"
+        # A second account makes the fallback ambiguous → None (held).
+        s.add(PlatformAccount(
+            id="second", platform="x", account_label="second",
+            credentials_encrypted=b"x",
+        ))
+        s.commit()
+        assert resolve_account_for_niche(s, _CONFIG) is None
+        # An explicit account_id always wins, regardless of count.
+        cfg = {**_CONFIG, "account_id": "second"}
+        assert resolve_account_for_niche(s, cfg).id == "second"
+
+
+def test_publish_records_posting_account(session_factory, monkeypatch):
+    # The draft's stamped account is recorded on the post_history row even when
+    # an explicit publisher is injected (no run_due_slots account override).
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        "opensocial.core.engine.resolve_slots",
+        lambda *a, **k: [now - timedelta(seconds=30)],
+    )
+    with session_factory() as s:
+        post = insert_generated_post(
+            s, niche_slug=NICHE, post_type="news", text="x",
+            ai_text_provider="template", priority_score=1.0,
+            platform_account_id="acctZ",
+        )
+        s.commit()
+        out = run_due_slots(
+            s, NICHE, _CONFIG, _auto(), now=now, publisher=_OkPublisher(),
+        )
+        assert len(out) == 1
+        hist = s.query(PostHistory).one()
+        assert hist.status == "success"
+        assert hist.platform_account_id == "acctZ"

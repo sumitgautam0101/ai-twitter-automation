@@ -19,7 +19,9 @@ only from real sources:
   niche disables images, or by default).
 
 ``get_image_provider(config)`` picks one from the **per-niche** ``image_source``
-field (``unsplash`` | ``content`` | ``none``; default ``none``).
+field (``unsplash`` | ``content`` | ``none``; default ``none``). For Unsplash the
+workspace's own ``UNSPLASH_ACCESS_KEY`` is read from ``config['unsplash_access_key']``
+(injected by the generation command), falling back to the process env.
 """
 
 from __future__ import annotations
@@ -57,11 +59,16 @@ class UnsplashProvider(ImageProvider):
     name = "unsplash"
     _API = "https://api.unsplash.com/photos/random"
 
-    def __init__(self, width: int = 1024, height: int = 1024) -> None:
+    def __init__(
+        self, width: int = 1024, height: int = 1024, access_key: str | None = None
+    ) -> None:
         # Unsplash serves its own sizes; width/height are kept for interface
         # parity (and a squarish crop hint) but don't force exact dimensions.
         self.width = int(width)
         self.height = int(height)
+        # The workspace's own Unsplash key, injected by the caller. Falls back to
+        # the process env so an operator-set ``UNSPLASH_ACCESS_KEY`` still works.
+        self.access_key = (access_key or "").strip() or None
 
     def image_for(self, prompt: str) -> ImageResult | None:
         text = (prompt or "").strip()
@@ -69,7 +76,7 @@ class UnsplashProvider(ImageProvider):
             return None
         import os
 
-        key = os.environ.get("UNSPLASH_ACCESS_KEY")
+        key = self.access_key or os.environ.get("UNSPLASH_ACCESS_KEY")
         if not key:
             return None
 
@@ -151,9 +158,10 @@ def get_image_provider(config: dict | None) -> ImageProvider:
     * ``none`` (default) — no images. Legacy ``ai`` also maps here, since AI
       image generation was removed.
     """
-    source = ((config or {}).get("image_source") or "none").strip().lower()
+    cfg = config or {}
+    source = (cfg.get("image_source") or "none").strip().lower()
     if source == "unsplash":
-        return UnsplashProvider()
+        return UnsplashProvider(access_key=cfg.get("unsplash_access_key"))
     if source == "content":
         return SourceMediaProvider()
     return NoneProvider()

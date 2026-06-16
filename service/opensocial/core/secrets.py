@@ -66,6 +66,23 @@ def encrypt_credentials(creds: dict, secret_key: str | None) -> bytes:
 
 
 def decrypt_credentials(blob: bytes, secret_key: str | None) -> dict:
-    """Decrypt the bytes stored in ``platform_accounts.credentials_encrypted``."""
-    raw = _fernet(secret_key).decrypt(blob)
+    """Decrypt the bytes stored in ``platform_accounts.credentials_encrypted``.
+
+    Raises :class:`SecretsError` (never the raw ``cryptography`` ``InvalidToken``)
+    when the blob can't be decrypted with this key — typically a key mismatch
+    (credentials encrypted under a different ``OPENSOCIAL_SECRET_KEY``/keyfile).
+    Callers catch ``SecretsError`` to hold/fall back to dry-run rather than
+    crashing; an uncaught ``InvalidToken`` previously killed the whole worker
+    tick with an empty error message.
+    """
+    from cryptography.fernet import InvalidToken
+
+    try:
+        raw = _fernet(secret_key).decrypt(blob)
+    except InvalidToken as exc:
+        raise SecretsError(
+            "Could not decrypt stored credentials — the encryption key does not "
+            "match the one used to save them (check OPENSOCIAL_SECRET_KEY / "
+            "opensocial.key)."
+        ) from exc
     return json.loads(raw.decode("utf-8"))

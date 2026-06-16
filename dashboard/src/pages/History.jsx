@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Check, X } from 'lucide-react';
 import { usePoll } from '../api';
+import { useApp } from '../AppContext';
 import { hms } from '../utils';
 import { Card, NicheTag, EmptyState } from '../components/common';
 
@@ -28,9 +29,10 @@ function Pill({ active, label, onClick }) {
 }
 
 export default function History() {
+  const { withAccount } = useApp();
   const [days, setDays] = useState(1);
   const [filter, setFilter] = useState('all status');
-  const { data } = usePoll(`/api/history?days=${days}`, 5000);
+  const { data } = usePoll(withAccount(`/api/history?days=${days}`), 5000);
 
   const rows = (data || []).filter((h) => {
     if (filter === 'success') return h.status === 'success';

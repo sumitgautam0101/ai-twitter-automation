@@ -5,13 +5,24 @@ import { QUICK_ACTIONS } from '../data';
 import { api, usePoll } from '../api';
 import { Card, Toggle } from '../components/common';
 
-const SETTINGS_TABS = [
-  ['general', 'General'],
-  ['actions', 'Actions'],
-  ['ai', 'AI providers'],
-  ['credentials', 'Credentials'],
-  ['danger', 'Danger zone'],
+// Settings split into two scopes, mirroring the sidebar's Workspace/Global
+// grouping. Workspace tabs act on the current workspace; Global tabs affect the
+// whole install (shared fetch cadence, the entire database).
+const SETTINGS_GROUPS = [
+  ['Workspace', [
+    ['general', 'Controls'],
+    ['actions', 'Actions'],
+    ['ai', 'AI providers'],
+    ['credentials', 'Credentials'],
+    ['reset-workspace', 'Reset workspace'],
+  ]],
+  ['Global', [
+    ['workspaces', 'Workspaces'],
+    ['fetch', 'Fetch & data'],
+    ['reset-db', 'Reset database'],
+  ]],
 ];
+const DANGER_TABS = new Set(['reset-workspace', 'reset-db']);
 
 const inputStyle = {
   colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8,
@@ -61,14 +72,16 @@ function kv(label, node, hint) {
 }
 
 // Compact inline secret field — writes to /api/credentials, never reads back.
-function AiKeyField({ env, set, onSaved }) {
+// With ``account`` the key is stored per workspace (AI keys); without it, global.
+function AiKeyField({ env, set, onSaved, account }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const save = () => {
     if (!value.trim() || busy) return;
     setBusy(true);
-    api.post('/api/credentials', { key: env, value: value.trim() })
+    const path = account ? `/api/credentials?account=${encodeURIComponent(account)}` : '/api/credentials';
+    api.post(path, { key: env, value: value.trim() })
       .then(() => { setValue(''); setEditing(false); onSaved && onSaved(); })
       .catch((e) => alert(e.message)).finally(() => setBusy(false));
   };
@@ -106,7 +119,8 @@ function AiKeyField({ env, set, onSaved }) {
 }
 
 function AiProvidersTab() {
-  const { data, reload } = usePoll('/api/ai', 0);
+  const { withWorkspace, account } = useApp();
+  const { data, reload } = usePoll(withWorkspace('/api/ai'), 0);
   const [cfg, setCfg] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -135,7 +149,7 @@ function AiProvidersTab() {
   const save = () => {
     if (!cfg || saving || !dirty || blocked) return;
     setSaving(true);
-    api.put('/api/ai', { text: cfg.text })
+    api.put(withWorkspace('/api/ai'), { text: cfg.text })
       .then((saved) => { setCfg(saved); setDirty(false); reload(); })
       .catch((e) => alert(e.message)).finally(() => setSaving(false));
   };
@@ -144,7 +158,7 @@ function AiProvidersTab() {
     <Card style={{ padding: '16px 18px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
         <span style={{ fontWeight: 600, fontSize: 13 }}>AI providers</span>
-        <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>global · applies to every niche</span>
+        <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>per workspace · applies to this workspace's niches</span>
         <button
           onClick={save}
           className="run-btn"
@@ -180,7 +194,7 @@ function AiProvidersTab() {
                     <input value={text.endpoint || ''} onChange={(e) => set('text', 'endpoint', e.target.value)} placeholder={text.provider === 'local' ? 'http://localhost:11434' : 'optional · custom gateway'} style={{ ...inputStyle, width: 200, borderColor: localMissingEndpoint ? 'rgba(245,69,92,.5)' : '#1c212a' }} />
                   ), text.provider === 'local' ? 'required' : null)}
                   {textKeyEnv && (
-                    <AiKeyField env={textKeyEnv} set={!!keyStatus[textKeyEnv]} onSaved={reload} />
+                    <AiKeyField env={textKeyEnv} set={!!keyStatus[textKeyEnv]} onSaved={reload} account={account} />
                   )}
                   {kv('temperature', (
                     <input type="number" min="0" max="2" step="0.05" value={text.temperature != null ? text.temperature : 0.7} onChange={(e) => set('text', 'temperature', +e.target.value)} style={numStyle} />
@@ -302,92 +316,141 @@ function ResetModal({ onClose, onDone }) {
   );
 }
 
-function DangerTab() {
-  const [resetting, setResetting] = useState(false);
+// Reset only the current workspace: its drafts, history, and settings. The
+// workspace, its niche files, and the shared content pool are kept.
+function ResetWorkspaceModal({ workspace, onClose, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(null);
+  const name = workspace ? workspace.label : 'this workspace';
+
+  const run = async () => {
+    if (busy || !workspace) return;
+    setBusy(true);
+    try {
+      const r = await api.post(`/api/accounts/${workspace.id}/reset`);
+      const total = Object.values(r.deleted || {}).reduce((a, b) => a + b, 0);
+      setDone(total);
+      setTimeout(onDone, 1300);
+    } catch (e) {
+      alert(e.message);
+      setBusy(false);
+    }
+  };
+
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 11 }}>
-        <span style={{ fontWeight: 600, fontSize: 13, color: '#f5455c' }}>Danger zone</span>
-        <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>irreversible · niche config files are preserved</span>
-      </div>
-      <Card style={{ padding: '16px 18px', border: '1px solid #2a1c20', display: 'flex', alignItems: 'center', gap: 14 }}>
-        <span style={{ display: 'inline-flex', width: 36, height: 36, borderRadius: 9, alignItems: 'center', justifyContent: 'center', background: 'rgba(245,69,92,.1)', color: '#f5455c', flexShrink: 0 }}>
-          <Database size={18} />
-        </span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>Reset database</div>
-          <div className="os-mono" style={{ fontSize: 10.5, color: '#5b6470', marginTop: 3, lineHeight: 1.4 }}>
-            wipe all content, drafts, history &amp; logs — optionally clear stored credentials too
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(5,7,10,.66)', display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(2px)' }}>
+      <div onClick={(e) => e.stopPropagation()} className="lane-open" style={{ width: 440, maxWidth: '92vw', background: '#111419', border: '1px solid #3a232b', borderRadius: 14, padding: '22px 24px', boxShadow: '0 24px 70px rgba(0,0,0,.6)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+          <span style={{ display: 'inline-flex', width: 34, height: 34, borderRadius: 9, alignItems: 'center', justifyContent: 'center', background: 'rgba(245,69,92,.12)', color: '#f5455c', flexShrink: 0 }}>
+            <AlertTriangle size={18} />
+          </span>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>Reset workspace @{name}</div>
+            <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>clears this workspace's drafts, history &amp; settings</div>
           </div>
         </div>
-        <button
-          onClick={() => setResetting(true)}
-          className="hover-danger"
-          style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 7, border: '1px solid rgba(245,69,92,.4)', background: 'rgba(245,69,92,.08)', color: '#f5455c', cursor: 'pointer', fontSize: 12, fontWeight: 700, padding: '9px 15px', borderRadius: 8 }}
-        >
-          <Trash2 size={14} /> Reset…
-        </button>
-      </Card>
+
+        {done == null ? (
+          <>
+            <div style={{ marginTop: 18, fontSize: 12.5, color: '#aeb6c0', lineHeight: 1.6 }}>
+              This removes <strong style={{ color: '#cfd6df' }}>@{name}</strong>'s generated posts, its publish history,
+              and its settings (dry-run, autopilot, AI, selected niches revert to defaults). Its{' '}
+              <strong style={{ color: '#cfd6df' }}>niche config files, the shared content pool, and other workspaces are kept</strong>. This cannot be undone.
+            </div>
+            <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+              <button onClick={onClose} className="hover-border-text" style={{ flex: 1, border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontSize: 12.5, fontWeight: 600, padding: '10px', borderRadius: 9 }}>Cancel</button>
+              <button onClick={run} disabled={busy || !workspace} style={{ flex: 1.4, border: 'none', cursor: busy || !workspace ? 'default' : 'pointer', fontSize: 12.5, fontWeight: 700, padding: '10px', borderRadius: 9, background: busy || !workspace ? '#2a1c20' : '#f5455c', color: busy || !workspace ? '#7a5560' : '#fff' }}>
+                {busy ? 'Resetting…' : 'Reset workspace'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 10, color: '#3ecf8e' }}>
+            <Check size={18} strokeWidth={3} />
+            <span style={{ fontSize: 13, fontWeight: 600 }}>Cleared {done} row{done === 1 ? '' : 's'}. Reloading…</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Workspace-scoped reset (amber): only the current workspace's data.
+function WorkspaceResetTab() {
+  const { currentWorkspace } = useApp();
+  const [resettingWs, setResettingWs] = useState(false);
+  const wsName = currentWorkspace ? currentWorkspace.label : null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 11 }}>
+          <span style={{ fontWeight: 600, fontSize: 13, color: '#f5a524' }}>This workspace</span>
+          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>scoped reset · niche files &amp; shared content preserved</span>
+        </div>
+        <Card style={{ padding: '16px 18px', border: '1px solid #2a2418', display: 'flex', alignItems: 'center', gap: 14 }}>
+          <span style={{ display: 'inline-flex', width: 36, height: 36, borderRadius: 9, alignItems: 'center', justifyContent: 'center', background: 'rgba(245,165,36,.1)', color: '#f5a524', flexShrink: 0 }}>
+            <Trash2 size={18} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>Reset workspace{wsName ? ` @${wsName}` : ''}</div>
+            <div className="os-mono" style={{ fontSize: 10.5, color: '#5b6470', marginTop: 3, lineHeight: 1.4 }}>
+              clear only this workspace's drafts, history &amp; settings — other workspaces untouched
+            </div>
+          </div>
+          <button
+            onClick={() => setResettingWs(true)}
+            disabled={!currentWorkspace}
+            className="hover-bright"
+            style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 7, border: '1px solid rgba(245,165,36,.4)', background: 'rgba(245,165,36,.08)', color: '#f5a524', cursor: currentWorkspace ? 'pointer' : 'default', fontSize: 12, fontWeight: 700, padding: '9px 15px', borderRadius: 8, opacity: currentWorkspace ? 1 : 0.5 }}
+          >
+            <Trash2 size={14} /> Reset…
+          </button>
+        </Card>
+      </div>
+
+      {resettingWs && <ResetWorkspaceModal workspace={currentWorkspace} onClose={() => setResettingWs(false)} onDone={() => window.location.reload()} />}
+    </div>
+  );
+}
+
+// Global reset (red): the entire database across every workspace.
+function DatabaseResetTab() {
+  const [resetting, setResetting] = useState(false);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 11 }}>
+          <span style={{ fontWeight: 600, fontSize: 13, color: '#f5455c' }}>Danger zone</span>
+          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>entire database · all workspaces · niche config files preserved</span>
+        </div>
+        <Card style={{ padding: '16px 18px', border: '1px solid #2a1c20', display: 'flex', alignItems: 'center', gap: 14 }}>
+          <span style={{ display: 'inline-flex', width: 36, height: 36, borderRadius: 9, alignItems: 'center', justifyContent: 'center', background: 'rgba(245,69,92,.1)', color: '#f5455c', flexShrink: 0 }}>
+            <Database size={18} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>Reset database</div>
+            <div className="os-mono" style={{ fontSize: 10.5, color: '#5b6470', marginTop: 3, lineHeight: 1.4 }}>
+              wipe all content, drafts, history &amp; logs across every workspace — optionally clear stored credentials too
+            </div>
+          </div>
+          <button
+            onClick={() => setResetting(true)}
+            className="hover-danger"
+            style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 7, border: '1px solid rgba(245,69,92,.4)', background: 'rgba(245,69,92,.08)', color: '#f5455c', cursor: 'pointer', fontSize: 12, fontWeight: 700, padding: '9px 15px', borderRadius: 8 }}
+          >
+            <Trash2 size={14} /> Reset…
+          </button>
+        </Card>
+      </div>
+
       {resetting && <ResetModal onClose={() => setResetting(false)} onDone={() => window.location.reload()} />}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// General (service controls + daily cap)
+// General (service controls)
 // ---------------------------------------------------------------------------
-
-function DailyCapCard() {
-  const { status, reloadStatus } = useApp();
-  const current = status ? status.global_daily_cap : null;
-  const [value, setValue] = useState('');
-  const [busy, setBusy] = useState(false);
-  React.useEffect(() => { if (current != null) setValue(String(current)); }, [current]);
-
-  const n = parseInt(value, 10);
-  const dirty = current != null && Number.isFinite(n) && n >= 0 && n !== current;
-
-  const save = () => {
-    if (!dirty || busy) return;
-    setBusy(true);
-    api.patch('/api/settings', { global_daily_cap: n })
-      .then(() => reloadStatus()).catch((e) => alert(e.message)).finally(() => setBusy(false));
-  };
-
-  return (
-    <Card style={{ padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>Posting limit</span>
-        <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>GLOBAL_DAILY_CAP · hard ceiling across every niche</span>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14 }}>
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>Max posts per day</div>
-          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>
-            published today: <span style={{ color: '#3ecf8e' }}>{status ? status.published_today : '—'}</span> / {current ?? '—'}
-          </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <input
-            type="number" min="0" value={value} onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') save(); }}
-            style={numStyle}
-          />
-          <button
-            onClick={save}
-            style={{
-              border: 'none', cursor: dirty && !busy ? 'pointer' : 'default', fontSize: 12, fontWeight: 700,
-              padding: '8px 16px', borderRadius: 8,
-              background: dirty && !busy ? '#3ecf8e' : '#1c222b', color: dirty && !busy ? '#0a0c0f' : '#7a828f',
-            }}
-          >
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-      </div>
-    </Card>
-  );
-}
 
 function FetchCadenceCard() {
   const { status, reloadStatus } = useApp();
@@ -442,15 +505,16 @@ function FetchCadenceCard() {
 }
 
 function GeneralTab() {
-  const { dryRun, toggleDry, autopilot, toggleAutopilot } = useApp();
+  const { dryRun, toggleDry, autopilot, toggleAutopilot, currentWorkspace } = useApp();
   const row = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 0', borderBottom: '1px solid #1a1f27' };
+  const wsName = currentWorkspace ? `@${currentWorkspace.label}` : 'this workspace';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Card style={{ padding: '16px 18px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
           <span style={{ fontWeight: 600, fontSize: 13 }}>Service controls</span>
-          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>app-level · saved to the service, applies without restart</span>
+          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>dry-run &amp; autopilot apply to {wsName} · saved without restart</span>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <div style={row}>
@@ -479,9 +543,20 @@ function GeneralTab() {
           </div>
         </div>
       </Card>
+    </div>
+  );
+}
 
+// Global tab: settings that govern the whole install, not one workspace. Today
+// that's the shared autopilot fetch cadence (one pass serves every workspace).
+function FetchDataTab() {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>Fetch &amp; data</span>
+        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>shared across all workspaces</span>
+      </div>
       <FetchCadenceCard />
-      <DailyCapCard />
     </div>
   );
 }
@@ -538,80 +613,118 @@ function ActionsTab() {
 // Credentials
 // ---------------------------------------------------------------------------
 
-function EnvKeyRow({ name, set, onSaved }) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState('');
-  const [busy, setBusy] = useState(false);
-  const save = () => {
-    if (!value.trim() || busy) return;
-    setBusy(true);
-    api
-      .post('/api/credentials', { key: name, value: value.trim() })
-      .then(() => { setValue(''); setEditing(false); onSaved(); })
-      .catch((e) => alert(e.message))
-      .finally(() => setBusy(false));
+// Manage enrolled workspaces: per-workspace daily cap, switch, and delete.
+function AccountsManager() {
+  const { reloadAccounts, account, setAccount } = useApp();
+  const { data: accounts, reload } = usePoll('/api/accounts', 15000);
+  const [capEdits, setCapEdits] = useState({}); // id -> string
+
+  const refresh = () => { reload(); reloadAccounts && reloadAccounts(); };
+
+  const saveCap = (a) => {
+    const raw = capEdits[a.id];
+    if (raw === undefined) return;
+    const trimmed = raw.trim();
+    const body = trimmed === ''
+      ? { clear_cap: true }
+      : { daily_post_cap: Math.max(0, parseInt(trimmed, 10) || 0) };
+    api.patch(`/api/accounts/${a.id}`, body)
+      .then(() => { setCapEdits((c) => { const n = { ...c }; delete n[a.id]; return n; }); refresh(); })
+      .catch((e) => alert(e.message));
   };
+
+  const remove = (a) => {
+    if (!confirm(`Delete workspace @${a.label}? This permanently removes its niches, drafts, history, and settings. The shared content pool and sources are kept.`)) return;
+    api.del(`/api/accounts/${a.id}`).then(refresh).catch((e) => alert(e.message));
+  };
+
+  if (!accounts || accounts.length === 0) return null;
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8 }}>
-      <span className="os-mono" style={{ fontSize: 12, color: '#cfd6df', minWidth: 190 }}>{name}</span>
-      {!editing ? (
-        <>
-          <span className="os-mono" style={{ fontSize: 12, color: set ? '#9aa3af' : '#5b6470', letterSpacing: 1 }}>
-            {set ? '••••••••••••' : 'not set'}
-          </span>
-          <button
-            onClick={() => setEditing(true)}
-            className="hover-bright"
-            style={{
-              marginLeft: 'auto', cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 10, fontWeight: 600, padding: '5px 11px', borderRadius: 6,
-              border: `1px solid ${set ? '#232932' : 'rgba(62,207,142,.35)'}`,
-              background: set ? 'transparent' : 'rgba(62,207,142,.1)', color: set ? '#9aa3af' : '#3ecf8e',
-            }}
-          >
-            {set ? 'replace' : 'set'}
-          </button>
-        </>
-      ) : (
-        <>
-          <input
-            autoFocus type="password" value={value} onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }}
-            placeholder="paste secret · write-only"
-            style={{ ...inputStyle, flex: 1 }}
-          />
-          <button
-            onClick={save}
-            style={{ border: 'none', background: '#3ecf8e', color: '#0a0c0f', cursor: 'pointer', fontSize: 11, fontWeight: 700, padding: '7px 13px', borderRadius: 7 }}
-          >
-            {busy ? 'saving…' : 'save'}
-          </button>
-          <button
-            onClick={() => setEditing(false)}
-            style={{ border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontSize: 11, padding: '7px 11px', borderRadius: 7 }}
-          >
-            cancel
-          </button>
-        </>
-      )}
-    </div>
+    <Card style={{ padding: '14px 16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 11 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: '#e7eaef' }}>Workspaces</span>
+        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>click to switch · cap empty = unlimited</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {accounts.map((a) => {
+          const editing = capEdits[a.id] !== undefined;
+          const capVal = editing ? capEdits[a.id] : (a.daily_post_cap == null ? '' : String(a.daily_post_cap));
+          const isCurrent = a.id === account;
+          return (
+            <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '10px 12px', background: isCurrent ? 'rgba(122,162,247,.08)' : '#0d1116', border: `1px solid ${isCurrent ? 'rgba(122,162,247,.4)' : '#1c212a'}`, borderRadius: 9 }}>
+              <span
+                onClick={() => setAccount(a.id)}
+                title={isCurrent ? 'current workspace' : 'switch to this workspace'}
+                style={{ width: 9, height: 9, borderRadius: '50%', flexShrink: 0, cursor: 'pointer', background: isCurrent ? '#7aa2f7' : '#3b414b' }}
+              />
+              <span onClick={() => setAccount(a.id)} style={{ fontSize: 12.5, fontWeight: 600, color: '#e7eaef', minWidth: 120, cursor: 'pointer' }}>
+                @{a.label}{isCurrent ? ' ·' : ''}
+                {isCurrent && <span className="os-mono" style={{ fontSize: 9, color: '#7aa2f7', marginLeft: 4 }}>current</span>}
+              </span>
+              <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
+                {a.niche_count} niche{a.niche_count === 1 ? '' : 's'} · {a.published_today} today
+              </span>
+              <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 7 }}>
+                <span className="os-mono" style={{ fontSize: 10, color: '#7a828f' }}>cap</span>
+                <input
+                  value={capVal}
+                  onChange={(e) => setCapEdits((c) => ({ ...c, [a.id]: e.target.value }))}
+                  onKeyDown={(e) => { if (e.key === 'Enter') saveCap(a); }}
+                  placeholder="∞"
+                  style={{ ...inputStyle, width: 70, textAlign: 'center', padding: '6px 8px' }}
+                />
+                {editing && (
+                  <button
+                    onClick={() => saveCap(a)}
+                    style={{ border: 'none', background: '#3ecf8e', color: '#0a0c0f', cursor: 'pointer', fontSize: 10, fontWeight: 700, padding: '6px 11px', borderRadius: 6 }}
+                  >
+                    save
+                  </button>
+                )}
+                <button
+                  onClick={() => remove(a)}
+                  className="hover-bright"
+                  title="delete account"
+                  style={{ border: '1px solid rgba(245,69,92,.3)', background: 'transparent', color: '#f5455c', cursor: 'pointer', fontSize: 10, fontWeight: 600, padding: '6px 10px', borderRadius: 6 }}
+                >
+                  delete
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
 
 const X_FIELDS = ['api_key', 'api_secret', 'access_token', 'access_token_secret'];
+const EMPTY_X = { api_key: '', api_secret: '', access_token: '', access_token_secret: '' };
 
-function XAccountCard({ group, onSaved }) {
+// The current workspace's own X credentials (the workspace IS one X account).
+// Enrolling/replacing writes only to this workspace — never a global list.
+function WorkspaceXCard() {
+  const { currentWorkspace, reloadAccounts } = useApp();
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ label: 'default', api_key: '', api_secret: '', access_token: '', access_token_secret: '' });
+  const [form, setForm] = useState(EMPTY_X);
   const [busy, setBusy] = useState(false);
-  const configured = group.accounts && group.accounts.length > 0;
+
+  if (!currentWorkspace) {
+    return (
+      <Card style={{ padding: '14px 16px' }}>
+        <span className="os-mono" style={{ fontSize: 11, color: '#5b6470' }}>create a workspace first to enroll its X credentials</span>
+      </Card>
+    );
+  }
+  const configured = !!currentWorkspace.configured;
 
   const save = () => {
     if (busy || X_FIELDS.some((f) => !form[f].trim())) return;
     setBusy(true);
     api
-      .post('/api/credentials/x', form)
-      .then(() => { setEditing(false); setForm({ ...form, api_key: '', api_secret: '', access_token: '', access_token_secret: '' }); onSaved(); })
+      .post(`/api/accounts/${currentWorkspace.id}/credentials`, form)
+      .then(() => { setEditing(false); setForm(EMPTY_X); reloadAccounts && reloadAccounts(); })
       .catch((e) => alert(e.message))
       .finally(() => setBusy(false));
   };
@@ -620,12 +733,8 @@ function XAccountCard({ group, onSaved }) {
     <Card style={{ padding: '14px 16px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 11 }}>
         <span style={{ width: 9, height: 9, borderRadius: 2, flexShrink: 0, background: '#7aa2f7' }} />
-        <span style={{ fontSize: 13, fontWeight: 700, color: '#e7eaef' }}>Twitter / X</span>
-        {configured && (
-          <span className="os-mono" style={{ fontSize: 10, color: '#9aa3af' }}>
-            {group.accounts.join(' · ')}
-          </span>
-        )}
+        <span style={{ fontSize: 13, fontWeight: 700, color: '#e7eaef' }}>X account</span>
+        <span className="os-mono" style={{ fontSize: 10, color: '#7aa2f7' }}>@{currentWorkspace.label}</span>
         <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, fontWeight: 600, color: configured ? '#3ecf8e' : '#f5a524' }}>
           {configured ? 'configured · encrypted' : 'not enrolled'}
         </span>
@@ -641,14 +750,10 @@ function XAccountCard({ group, onSaved }) {
             background: configured ? 'transparent' : 'rgba(62,207,142,.1)', color: configured ? '#9aa3af' : '#3ecf8e',
           }}
         >
-          {configured ? 'replace credentials' : 'enroll account'}
+          {configured ? 'replace credentials' : 'enroll this workspace'}
         </button>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-            <span className="os-mono" style={{ fontSize: 11, color: '#7a828f', minWidth: 190 }}>account label</span>
-            <input value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} style={{ ...inputStyle, flex: 1 }} />
-          </div>
           {X_FIELDS.map((f) => (
             <div key={f} style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <span className="os-mono" style={{ fontSize: 11, color: '#7a828f', minWidth: 190 }}>{f}</span>
@@ -666,7 +771,7 @@ function XAccountCard({ group, onSaved }) {
               {busy ? 'saving…' : 'save encrypted'}
             </button>
             <button
-              onClick={() => setEditing(false)}
+              onClick={() => { setEditing(false); setForm(EMPTY_X); }}
               style={{ border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontSize: 11, padding: '8px 13px', borderRadius: 7 }}
             >
               cancel
@@ -678,38 +783,103 @@ function XAccountCard({ group, onSaved }) {
   );
 }
 
-function CredentialsTab() {
-  const { data: groups, reload } = usePoll('/api/credentials', 15000);
-  const xGroup = (groups || []).find((g) => g.type === 'x_account');
-  const envGroups = (groups || []).filter((g) => g.type === 'env');
+// AI provider keys for the current workspace (OpenAI / Anthropic). Per workspace
+// so each can authenticate with its own account; never injected into the env.
+const AI_KEYS = [['OPENAI_API_KEY', 'OpenAI'], ['ANTHROPIC_API_KEY', 'Anthropic']];
 
+function WorkspaceAiKeysCard() {
+  const { withWorkspace, account } = useApp();
+  const { data, reload } = usePoll(withWorkspace('/api/ai'), 0);
+  const keyStatus = (data && data.key_status) || {};
+
+  return (
+    <Card style={{ padding: '14px 16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <span style={{ width: 9, height: 9, borderRadius: 2, flexShrink: 0, background: '#b48ef7' }} />
+        <span style={{ fontSize: 13, fontWeight: 700, color: '#e7eaef' }}>AI keys</span>
+        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>per workspace · used by this workspace's generation</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+        {AI_KEYS.map(([env, label]) => (
+          <div key={env} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <span style={{ minWidth: 0 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 600, color: '#cfd6df' }}>{label}</span>
+              <span className="os-mono" style={{ fontSize: 9.5, color: '#5b6470', marginLeft: 8 }}>{env}</span>
+            </span>
+            <AiKeyField env={env} set={!!keyStatus[env]} onSaved={reload} account={account} />
+          </div>
+        ))}
+      </div>
+      <div className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', marginTop: 12, lineHeight: 1.5 }}>
+        source API keys (YouTube, Guardian, NASA…) are shared across workspaces — set them on the Sources tab.
+      </div>
+    </Card>
+  );
+}
+
+// Image-provider keys for the current workspace (Unsplash). Per workspace like
+// the AI keys — read by niches whose Image source is Unsplash. Status comes from
+// the same /api/ai key_status payload (which reports every per-workspace key).
+const IMAGE_KEYS = [['UNSPLASH_ACCESS_KEY', 'Unsplash']];
+
+function WorkspaceImageKeysCard() {
+  const { withWorkspace, account } = useApp();
+  const { data, reload } = usePoll(withWorkspace('/api/ai'), 0);
+  const keyStatus = (data && data.key_status) || {};
+
+  return (
+    <Card style={{ padding: '14px 16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <span style={{ width: 9, height: 9, borderRadius: 2, flexShrink: 0, background: '#3ecf8e' }} />
+        <span style={{ fontSize: 13, fontWeight: 700, color: '#e7eaef' }}>Image keys</span>
+        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>per workspace · used for Unsplash photos</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+        {IMAGE_KEYS.map(([env, label]) => (
+          <div key={env} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <span style={{ minWidth: 0 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 600, color: '#cfd6df' }}>{label}</span>
+              <span className="os-mono" style={{ fontSize: 9.5, color: '#5b6470', marginLeft: 8 }}>{env}</span>
+            </span>
+            <AiKeyField env={env} set={!!keyStatus[env]} onSaved={reload} account={account} />
+          </div>
+        ))}
+      </div>
+      <div className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', marginTop: 12, lineHeight: 1.5 }}>
+        applies to niches with Image source = Unsplash (per-niche, General tab). Without a key those niches fall back to no image.
+      </div>
+    </Card>
+  );
+}
+
+// Workspace-scoped: only the current workspace's own X + AI credentials. The
+// list of all workspaces lives in the Global → Workspaces tab.
+function CredentialsTab() {
+  const { currentWorkspace } = useApp();
+  const wsName = currentWorkspace ? `@${currentWorkspace.label}` : 'this workspace';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
         <span style={{ fontWeight: 600, fontSize: 13 }}>API keys &amp; secrets</span>
         <span className="os-mono" style={{ fontSize: 10, color: '#3ecf8e' }}>encrypted at rest ✓</span>
-        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>write-only · secrets never displayed</span>
+        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>{wsName} only · write-only</span>
       </div>
-      {xGroup && <XAccountCard group={xGroup} onSaved={reload} />}
-      {envGroups.map((g) => {
-        const allSet = g.keys.every((k) => k.set);
-        return (
-          <Card key={g.platform} style={{ padding: '14px 16px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 11 }}>
-              <span style={{ width: 9, height: 9, borderRadius: 2, flexShrink: 0, background: allSet ? '#3ecf8e' : '#f5a524' }} />
-              <span style={{ fontSize: 13, fontWeight: 700, color: '#e7eaef' }}>{g.platform}</span>
-              <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, fontWeight: 600, color: allSet ? '#3ecf8e' : '#f5a524' }}>
-                {allSet ? 'configured' : 'incomplete'}
-              </span>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-              {g.keys.map((k) => (
-                <EnvKeyRow key={k.name} name={k.name} set={k.set} onSaved={reload} />
-              ))}
-            </div>
-          </Card>
-        );
-      })}
+      <WorkspaceXCard />
+      <WorkspaceAiKeysCard />
+      <WorkspaceImageKeysCard />
+    </div>
+  );
+}
+
+// Global: manage every workspace (switch, set daily cap, delete).
+function WorkspacesTab() {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>Workspaces</span>
+        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>all workspaces · switch, cap &amp; delete</span>
+      </div>
+      <AccountsManager />
     </div>
   );
 }
@@ -719,28 +889,35 @@ export default function Settings() {
   return (
     <div>
       <div style={{ display: 'grid', gridTemplateColumns: '194px 1fr', gap: 20, alignItems: 'start' }}>
-        {/* left tab rail */}
+        {/* left tab rail — grouped by scope (workspace vs global) */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3, background: '#0c0f13', border: '1px solid #1a1f27', borderRadius: 12, padding: 8 }}>
-          {SETTINGS_TABS.map(([k, label]) => {
-            const active = settingsTab === k;
-            const danger = k === 'danger';
-            return (
-              <button
-                key={k}
-                onClick={() => setSettingsTab(k)}
-                className={`hover-tab${active ? ' active' : ''}`}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', border: 'none',
-                  cursor: 'pointer', fontSize: 13, fontWeight: active ? 600 : 500, padding: '9px 12px', borderRadius: 8,
-                  background: active ? (danger ? '#211519' : '#15201b') : 'transparent',
-                  color: active ? (danger ? '#f5455c' : '#3ecf8e') : (danger ? '#8a6a70' : '#8b93a0'),
-                }}
-              >
-                <span style={{ width: 5, height: 5, borderRadius: '50%', flexShrink: 0, background: active ? (danger ? '#f5455c' : '#3ecf8e') : '#3b414b' }} />
-                {label}
-              </button>
-            );
-          })}
+          {SETTINGS_GROUPS.map(([group, items], gi) => (
+            <React.Fragment key={group}>
+              <div className="os-mono" style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: '.5px', color: '#4b5563', padding: gi === 0 ? '4px 10px 5px' : '12px 10px 5px' }}>
+                {group.toUpperCase()}
+              </div>
+              {items.map(([k, label]) => {
+                const active = settingsTab === k;
+                const danger = DANGER_TABS.has(k);
+                return (
+                  <button
+                    key={k}
+                    onClick={() => setSettingsTab(k)}
+                    className={`hover-tab${active ? ' active' : ''}`}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', border: 'none',
+                      cursor: 'pointer', fontSize: 13, fontWeight: active ? 600 : 500, padding: '9px 12px', borderRadius: 8,
+                      background: active ? (danger ? '#211519' : '#15201b') : 'transparent',
+                      color: active ? (danger ? '#f5455c' : '#3ecf8e') : (danger ? '#8a6a70' : '#8b93a0'),
+                    }}
+                  >
+                    <span style={{ width: 5, height: 5, borderRadius: '50%', flexShrink: 0, background: active ? (danger ? '#f5455c' : '#3ecf8e') : '#3b414b' }} />
+                    {label}
+                  </button>
+                );
+              })}
+            </React.Fragment>
+          ))}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -748,7 +925,10 @@ export default function Settings() {
           {settingsTab === 'actions' && <ActionsTab />}
           {settingsTab === 'ai' && <AiProvidersTab />}
           {settingsTab === 'credentials' && <CredentialsTab />}
-          {settingsTab === 'danger' && <DangerTab />}
+          {settingsTab === 'reset-workspace' && <WorkspaceResetTab />}
+          {settingsTab === 'workspaces' && <WorkspacesTab />}
+          {settingsTab === 'fetch' && <FetchDataTab />}
+          {settingsTab === 'reset-db' && <DatabaseResetTab />}
         </div>
       </div>
     </div>

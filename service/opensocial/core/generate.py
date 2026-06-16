@@ -28,6 +28,7 @@ from opensocial.ai.prompts import build_messages, unsplash_query
 from opensocial.ai.ranking import choose_post_type, rerank_by_importance
 from opensocial.ai.text import TextProvider, TextProviderError, get_text_provider
 from opensocial.core.approval import initial_status
+from opensocial.core.config import niche_account_id
 from opensocial.core.db import (
     GeneratedPost,
     content_ids_with_posts,
@@ -297,6 +298,7 @@ def generate_for_niche(
     image_provider: ImageProvider | None = None,
     persist: bool = True,
     rerank: bool = True,
+    platform_account_id: str | None = None,
 ) -> list[DraftResult]:
     """Generate up to ``limit`` source-derived drafts for a niche.
 
@@ -305,12 +307,17 @@ def generate_for_niche(
     (used by the ``preview`` dry-run command). With ``rerank=True`` (default),
     an LLM importance pass reorders the top of the queue before drafting; it is
     a no-op offline, so ``preview`` can leave it on too.
+
+    ``platform_account_id`` stamps each draft with the generating workspace so
+    the queue and publishing stay isolated when several workspaces follow the
+    same (shared) niche. Falls back to the niche config's legacy ``account_id``.
     """
     text_provider = text_provider or get_text_provider(config)
     image_provider = image_provider or get_image_provider(config)
     pt_cfg = PostTypesConfig.from_niche(config)
     niche_name = config.get("display_name") or niche_slug
     char_limit = int(config.get("char_limit", DEFAULT_CHAR_LIMIT))
+    account_id = platform_account_id or niche_account_id(config)
 
     already = content_ids_with_posts(session, niche_slug)
     ranked = candidate_queue(session, niche_slug, config)
@@ -370,6 +377,7 @@ def generate_for_niche(
                 ai_image_provider=img_provider,
                 priority_score=cand.priority_score,
                 status=new_status,
+                platform_account_id=account_id,
             )
         already.add(cand.row.id)
         drafts.append(
@@ -393,6 +401,7 @@ def generate_independent(
     image_provider: ImageProvider | None = None,
     topic: str | None = None,
     persist: bool = True,
+    platform_account_id: str | None = None,
 ) -> list[DraftResult]:
     """Generate the niche's independent post(s) — e.g. the daily Take.
 
@@ -400,6 +409,10 @@ def generate_independent(
     tops up to ``per_day`` independent posts created today, so re-running won't
     flood the queue. ``topic`` overrides the niche/topic seed (otherwise the
     niche name is the subject and the persona supplies the angle).
+
+    ``platform_account_id`` stamps the drafts and scopes the per-day idempotency
+    to this workspace, so each workspace following a shared niche gets its own
+    independent take. Falls back to the niche config's legacy ``account_id``.
     """
     cfg = IndependentConfig.from_niche(config)
     if not cfg.enabled:
@@ -409,9 +422,10 @@ def generate_independent(
     image_provider = get_image_provider(config) if image_provider is None else image_provider
     niche_name = config.get("display_name") or niche_slug
     char_limit = int(config.get("char_limit", DEFAULT_CHAR_LIMIT))
+    account_id = platform_account_id or niche_account_id(config)
 
-    # How many independent posts already exist today?
-    made_today = _independent_count_today(session, niche_slug)
+    # How many independent posts already exist today (for this workspace)?
+    made_today = _independent_count_today(session, niche_slug, account_id)
     remaining = max(0, cfg.per_day - made_today)
     if remaining == 0:
         return []
@@ -451,6 +465,7 @@ def generate_independent(
                 media_attribution=attribution,
                 ai_image_provider=img_provider,
                 status=initial_status(config),
+                platform_account_id=account_id,
             )
         drafts.append(
             DraftResult(
@@ -464,7 +479,9 @@ def generate_independent(
     return drafts
 
 
-def _independent_count_today(session: Session, niche_slug: str) -> int:
+def _independent_count_today(
+    session: Session, niche_slug: str, platform_account_id: str | None = None
+) -> int:
     from datetime import datetime, timedelta, timezone
 
     from sqlalchemy import func, select
@@ -472,14 +489,16 @@ def _independent_count_today(session: Session, niche_slug: str) -> int:
     now = datetime.now(timezone.utc)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
-    return int(
-        session.execute(
-            select(func.count()).where(
-                GeneratedPost.niche_slug == niche_slug,
-                GeneratedPost.content_item_id.is_(None),
-                GeneratedPost.created_at >= start,
-                GeneratedPost.created_at < end,
-            )
-        ).scalar()
-        or 0
+    stmt = select(func.count()).where(
+        GeneratedPost.niche_slug == niche_slug,
+        GeneratedPost.content_item_id.is_(None),
+        GeneratedPost.created_at >= start,
+        GeneratedPost.created_at < end,
     )
+    # Scope idempotency to the workspace so each gets its own daily take on a
+    # shared niche; ``None`` keeps the legacy niche-wide behaviour.
+    if platform_account_id is not None:
+        stmt = stmt.where(
+            GeneratedPost.platform_account_id == platform_account_id
+        )
+    return int(session.execute(stmt).scalar() or 0)

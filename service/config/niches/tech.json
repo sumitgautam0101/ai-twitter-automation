@@ -121,7 +121,8 @@
       "tags": [
         "technology",
         "programming"
-      ]
+      ],
+      "enabled": false
     },
     "producthunt": {
       "enabled": true,
@@ -141,18 +142,18 @@
       ]
     }
   },
-  "image_source": "content",
+  "image_source": "unsplash",
   "schedule": {
     "windows": [
       [
-        "08:00",
-        "23:30"
+        "15:15",
+        "21:00"
       ]
     ],
     "posts_per_day": [
-      6,
-      6
+      12,
+      12
     ],
-    "min_gap_minutes": 45
+    "min_gap_minutes": 5
   }
 }

@@ -117,6 +117,11 @@ class GeneratedPost(Base):
         ForeignKey("content_items.id")
     )
     niche_slug: Mapped[str] = mapped_column(String, nullable=False)
+    # The workspace (X account) that generated this draft. Niches are a shared
+    # catalog, so this is what isolates one workspace's drafts from another's for
+    # the same niche, and selects which drafts a workspace publishes. NULL means
+    # "resolve the account at publish time" (legacy single-account installs).
+    platform_account_id: Mapped[str | None] = mapped_column(String)
     post_type: Mapped[str] = mapped_column(String, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     media_path: Mapped[str | None] = mapped_column(Text)
@@ -217,7 +222,33 @@ def make_engine(db_path: str | Path):
         f"sqlite:///{db_path}", future=True, json_serializer=_json_serializer
     )
     Base.metadata.create_all(engine)
+    _run_migrations(engine)
     return engine
+
+
+# Additive, idempotent column migrations. ``create_all`` creates missing tables
+# but never alters existing ones, so columns added after a DB was first created
+# need an explicit ``ALTER TABLE``. Each entry is (table, column, DDL type);
+# applied only when the column is absent. Keep these backward-compatible (new
+# columns must be nullable / have a default) — there is no down-migration.
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("generated_posts", "platform_account_id", "VARCHAR"),
+]
+
+
+def _run_migrations(engine) -> None:
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        for table, column, ddl_type in _COLUMN_MIGRATIONS:
+            cols = {
+                row[1]
+                for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")
+            }
+            if column not in cols:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"
+                )
 
 
 def make_session_factory(db_path: str | Path) -> sessionmaker[Session]:
@@ -283,6 +314,7 @@ def insert_generated_post(
     ai_image_provider: str | None = None,
     priority_score: float | None = None,
     status: str = "draft",
+    platform_account_id: str | None = None,
 ) -> GeneratedPost:
     """Persist one draft post and return the ORM row (already flushed)."""
     now = _utcnow()
@@ -290,6 +322,7 @@ def insert_generated_post(
         id=uuid.uuid4().hex,
         content_item_id=content_item_id,
         niche_slug=niche_slug,
+        platform_account_id=platform_account_id,
         post_type=post_type,
         text=text,
         media_path=media_path,
@@ -365,12 +398,17 @@ def record_post_history(
 
 
 def published_today_count(
-    session: Session, *, niche_slug: str | None = None, day: datetime | None = None
+    session: Session,
+    *,
+    niche_slug: str | None = None,
+    platform_account_id: str | None = None,
+    day: datetime | None = None,
 ) -> int:
-    """Number of successful publishes today (optionally scoped to a niche).
+    """Number of successful publishes today (optionally scoped).
 
     Successful publishes are ``post_history`` rows with ``status='success'``;
-    the niche filter joins back to ``generated_posts``. Used for the global and
+    the niche filter joins back to ``generated_posts``. ``platform_account_id``
+    filters on the recorded posting account. Used for the per-account and
     per-niche daily caps and for catch-up math.
     """
     start, end = _day_bounds(day)
@@ -383,6 +421,10 @@ def published_today_count(
             PostHistory.attempted_at < end,
         )
     )
+    if platform_account_id is not None:
+        stmt = stmt.where(
+            PostHistory.platform_account_id == platform_account_id
+        )
     if niche_slug is not None:
         stmt = stmt.join(
             GeneratedPost, GeneratedPost.id == PostHistory.generated_post_id
@@ -391,17 +433,28 @@ def published_today_count(
 
 
 def last_published_at(
-    session: Session, niche_slug: str
+    session: Session,
+    niche_slug: str,
+    *,
+    platform_account_id: str | None = None,
 ) -> datetime | None:
-    """Timestamp of the niche's most recent successful publish (for min-gap)."""
-    return session.execute(
+    """Timestamp of the niche's most recent successful publish (for min-gap).
+
+    ``platform_account_id`` scopes to one workspace's publishes so the min-gap
+    throttle is per workspace — niches are shared, so two workspaces posting the
+    same niche must not throttle each other.
+    """
+    stmt = (
         select(func.max(PostHistory.attempted_at))
         .join(GeneratedPost, GeneratedPost.id == PostHistory.generated_post_id)
         .where(
             GeneratedPost.niche_slug == niche_slug,
             PostHistory.status == "success",
         )
-    ).scalar()
+    )
+    if platform_account_id is not None:
+        stmt = stmt.where(PostHistory.platform_account_id == platform_account_id)
+    return session.execute(stmt).scalar()
 
 
 def log(session: Session, level: str, message: str) -> None:
@@ -462,6 +515,195 @@ def default_platform_account(
     ).scalars().first()
 
 
+def get_platform_account(
+    session: Session, account_id: str
+) -> PlatformAccount | None:
+    """Fetch a platform account by id (``None`` if it no longer exists)."""
+    if not account_id:
+        return None
+    return session.get(PlatformAccount, account_id)
+
+
+def get_platform_account_by_label(
+    session: Session, label: str, *, platform: str = "x"
+) -> PlatformAccount | None:
+    """Fetch a platform account by its human label."""
+    return session.execute(
+        select(PlatformAccount).where(
+            PlatformAccount.platform == platform,
+            PlatformAccount.account_label == label,
+        )
+    ).scalar_one_or_none()
+
+
+def update_platform_account(
+    session: Session,
+    account_id: str,
+    *,
+    account_label: str | None = None,
+    daily_post_cap: int | None = None,
+    clear_cap: bool = False,
+    credentials_encrypted: bytes | None = None,
+) -> PlatformAccount | None:
+    """Update an account's label, daily cap, and/or X credentials.
+
+    ``clear_cap=True`` sets ``daily_post_cap`` back to NULL (unlimited);
+    otherwise a non-None ``daily_post_cap`` is applied. A non-None
+    ``credentials_encrypted`` replaces the stored (Fernet) credential blob.
+    Returns the row, or ``None`` if the account doesn't exist.
+    """
+    acct = session.get(PlatformAccount, account_id)
+    if acct is None:
+        return None
+    if account_label is not None and account_label.strip():
+        acct.account_label = account_label.strip()
+    if clear_cap:
+        acct.daily_post_cap = None
+    elif daily_post_cap is not None:
+        acct.daily_post_cap = daily_post_cap
+    if credentials_encrypted is not None:
+        acct.credentials_encrypted = credentials_encrypted
+    session.commit()
+    return acct
+
+
+def delete_platform_account(session: Session, account_id: str) -> bool:
+    """Delete an account by id. Returns True if a row was removed."""
+    acct = session.get(PlatformAccount, account_id)
+    if acct is None:
+        return False
+    session.delete(acct)
+    session.commit()
+    return True
+
+
+def delete_workspace(
+    session: Session, workspace_id: str, *, config_dir: str | Path | None = None
+) -> dict[str, int]:
+    """Delete a workspace (= an X account) and everything scoped to it.
+
+    Removes the account, its drafts + their publish history, and its
+    ``ws:<id>:*`` settings (which include its followed-niche list). Niches are a
+    **shared catalog**, so their config files are left untouched — deleting a
+    workspace never removes a niche other workspaces may also follow. The shared
+    ``content_items`` pool and global source config are likewise intact.
+    ``config_dir`` is accepted for signature compatibility but unused. Returns
+    deleted counts.
+    """
+    deleted: dict[str, int] = {}
+
+    post_ids = [
+        r[0]
+        for r in session.execute(
+            select(GeneratedPost.id).where(
+                GeneratedPost.platform_account_id == workspace_id
+            )
+        ).all()
+    ]
+    if post_ids:
+        deleted["post_history"] = (
+            session.query(PostHistory)
+            .filter(PostHistory.generated_post_id.in_(post_ids))
+            .delete(synchronize_session=False)
+        )
+        deleted["generated_posts"] = (
+            session.query(GeneratedPost)
+            .filter(GeneratedPost.platform_account_id == workspace_id)
+            .delete(synchronize_session=False)
+        )
+
+    deleted["app_settings"] = (
+        session.query(AppSetting)
+        .filter(AppSetting.key.like(f"ws:{workspace_id}:%"))
+        .delete(synchronize_session=False)
+    )
+
+    acct = session.get(PlatformAccount, workspace_id)
+    if acct is not None:
+        session.delete(acct)
+        deleted["platform_accounts"] = 1
+
+    session.commit()
+
+    # Remove the workspace's niche config files (disk is the source of truth).
+    if config_dir is not None:
+        removed = 0
+        for path in Path(config_dir).glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            if (data.get("account_id") or None) == workspace_id:
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        deleted["niche_files"] = removed
+
+    return deleted
+
+
+def reset_workspace(
+    session: Session, workspace_id: str, *, config_dir: str | Path | None = None
+) -> dict[str, int]:
+    """Reset one workspace's runtime data *without* deleting the workspace.
+
+    Clears the workspace's generated posts + their publish history and removes
+    its per-workspace settings (``ws:<id>:*``) so dry-run / app_mode / AI /
+    followed niches revert to defaults. The workspace account, its niche config
+    files, the shared content pool, sources, and logs are all left intact —
+    this is the per-workspace analogue of :func:`reset_database`.
+    """
+    deleted: dict[str, int] = {}
+
+    post_ids = [
+        r[0]
+        for r in session.execute(
+            select(GeneratedPost.id).where(
+                GeneratedPost.platform_account_id == workspace_id
+            )
+        ).all()
+    ]
+    if post_ids:
+        deleted["post_history"] = (
+            session.query(PostHistory)
+            .filter(PostHistory.generated_post_id.in_(post_ids))
+            .delete(synchronize_session=False)
+        )
+        deleted["generated_posts"] = (
+            session.query(GeneratedPost)
+            .filter(GeneratedPost.platform_account_id == workspace_id)
+            .delete(synchronize_session=False)
+        )
+
+    deleted["app_settings"] = (
+        session.query(AppSetting)
+        .filter(AppSetting.key.like(f"ws:{workspace_id}:%"))
+        .delete(synchronize_session=False)
+    )
+
+    session.commit()
+    return deleted
+
+
+def ensure_default_workspace(
+    session: Session, *, label: str = "Default", platform: str = "x"
+) -> PlatformAccount:
+    """Guarantee at least one workspace exists, so the app always has one.
+
+    On a fresh or pre-workspace install this creates an empty-credential
+    workspace named ``label``; X credentials are enrolled later. When any
+    account already exists it returns the first one untouched.
+    """
+    existing = list_platform_accounts(session, platform=platform)
+    if existing:
+        return existing[0]
+    return add_platform_account(
+        session, account_label=label, credentials_encrypted=b"", platform=platform
+    )
+
+
 def get_app_setting(session: Session, key: str) -> str | None:
     row = session.get(AppSetting, key)
     return row.value if row is not None else None
@@ -508,11 +750,19 @@ def source_statuses(session: Session) -> dict[str, SourceConfig]:
     return {r.source_name: r for r in rows}
 
 
-def reset_database(session: Session, *, clear_credentials: bool = False) -> dict[str, int]:
+def reset_database(
+    session: Session,
+    *,
+    clear_credentials: bool = False,
+    config_dir: str | Path | None = None,
+) -> dict[str, int]:
     """Wipe runtime data (content, drafts, history, logs, fetch status).
 
-    Niche config files on disk are never touched. ``clear_credentials`` also
-    removes encrypted secrets and platform accounts.
+    Niche config files are kept, but when ``clear_credentials`` removes every
+    workspace and ``config_dir`` is given, each niche's ``account_id`` is
+    released (back to the unassigned shared pool) so niches don't end up owned
+    by a deleted workspace — which would hide them from every workspace's view.
+    ``clear_credentials`` also removes encrypted secrets and platform accounts.
     Returns a per-table count of deleted rows.
     """
     # Order matters: delete children before parents to respect FKs.
@@ -534,24 +784,58 @@ def reset_database(session: Session, *, clear_credentials: bool = False) -> dict
         session.query(model).delete()
         deleted[model.__tablename__] = int(count)
 
-    # Selected niches are runtime state (stored in app_settings) — clear them so
-    # a reset returns to the fresh-DB baseline of nothing selected / enabled.
-    followed = session.get(AppSetting, "followed_niches")
-    if followed is not None:
-        session.delete(followed)
-        deleted["followed_niches"] = 1
-
-    if clear_credentials:
-        secrets = list(
+    def _delete_settings_like(pattern: str) -> int:
+        rows = list(
             session.execute(
-                select(AppSetting).where(AppSetting.key.like("secret:%"))
+                select(AppSetting).where(AppSetting.key.like(pattern))
             ).scalars()
         )
-        for row in secrets:
+        for row in rows:
             session.delete(row)
-        deleted["app_settings_secrets"] = len(secrets)
+        return len(rows)
+
+    # Selected niches are runtime state (stored in app_settings) — clear them so
+    # a reset returns to the fresh-DB baseline of nothing selected / enabled.
+    # Covers both the legacy global key and every workspace-scoped one.
+    n_followed = _delete_settings_like("followed_niches")
+    n_followed += _delete_settings_like("ws:%:followed_niches")
+    if n_followed:
+        deleted["followed_niches"] = n_followed
+
+    if clear_credentials:
+        # Accounts are gone, so all workspace-scoped settings (dry_run, app_mode,
+        # ai, and per-workspace ``ws:<id>:secret:<ENV>``) are orphaned — drop the
+        # whole ``ws:`` namespace plus any legacy global ``secret:`` keys.
+        # Otherwise stored API keys would survive a "clear credentials" reset.
+        n_secrets = _delete_settings_like("secret:%")
+        n_ws = _delete_settings_like("ws:%")
+        deleted["app_settings_secrets"] = n_secrets
+        deleted["app_settings_workspace"] = n_ws
 
     session.commit()
+
+    # All workspaces are gone — release every niche back to the shared pool so
+    # none stays owned by a now-deleted workspace (which would hide it from the
+    # Niches page in every workspace).
+    if clear_credentials and config_dir is not None:
+        released = 0
+        for path in Path(config_dir).glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            if data.get("account_id"):
+                data.pop("account_id", None)
+                try:
+                    path.write_text(
+                        json.dumps(data, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    released += 1
+                except OSError:
+                    pass
+        deleted["niches_released"] = released
+
     return deleted
 
 

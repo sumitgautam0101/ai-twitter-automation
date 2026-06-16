@@ -429,8 +429,8 @@ function RandomizeModal({ count, onClose, onSubmit }) {
 // page
 // ===========================================================================
 export default function Schedule() {
-  const { nichesVersion } = useApp();
-  const { data: sched, reload } = usePoll('/api/schedule', 30000);
+  const { nichesVersion, withAccount } = useApp();
+  const { data: sched, reload } = usePoll(withAccount('/api/schedule'), 30000);
   const [edits, setEdits] = useState({}); // slug -> {windows(min), ppdMin, ppdMax, minGap}
   const [open, setOpen] = useState(null); // expanded slug
   const [saving, setSaving] = useState(null);

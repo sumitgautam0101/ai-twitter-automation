@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Search } from 'lucide-react';
 import { usePoll } from '../api';
+import { useApp } from '../AppContext';
 import { LEVEL_COLORS } from '../data';
 import { hms } from '../utils';
 import { PulseDot, EmptyState } from '../components/common';
@@ -8,9 +9,10 @@ import { PulseDot, EmptyState } from '../components/common';
 const MSG_COLOR = { error: '#f0a8b0', warn: '#e7c98a', info: '#aeb6c0' };
 
 export default function Logs() {
+  const { withAccount } = useApp();
   const [level, setLevel] = useState('all');
   const [search, setSearch] = useState('');
-  const { data } = usePoll('/api/logs?limit=300', 3000);
+  const { data } = usePoll(withAccount('/api/logs?limit=300'), 3000);
   const all = data || [];
 
   const counts = { all: all.length, info: 0, warn: 0, error: 0 };

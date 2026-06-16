@@ -43,7 +43,9 @@ def client(tmp_path, monkeypatch):
     config_dir = tmp_path / "niches"
     config_dir.mkdir()
     (config_dir / f"{NICHE}.json").write_text(json.dumps(NICHE_CONFIG))
-    app = create_app(tmp_path / "test.db", config_dir)
+    # Most API tests assert on a clean slate; the Default-workspace seeding is
+    # covered by its own test below.
+    app = create_app(tmp_path / "test.db", config_dir, seed_default=False)
     return TestClient(app)
 
 
@@ -86,16 +88,6 @@ def test_settings_patch_persists_and_resolves(client):
 
 def test_settings_patch_rejects_bad_mode(client):
     assert client.patch("/api/settings", json={"app_mode": "yolo"}).status_code == 422
-
-
-def test_global_daily_cap_is_configurable(client):
-    body = client.patch("/api/settings", json={"global_daily_cap": 7}).json()
-    assert body["global_daily_cap"] == 7
-    # resolved from the DB overlay, not just the env default
-    with client.app.state.session_factory() as s:
-        assert resolve_settings(s).global_daily_cap == 7
-    # negatives are rejected
-    assert client.patch("/api/settings", json={"global_daily_cap": -1}).status_code == 422
 
 
 # --- posts & lifecycle transitions -----------------------------------------
@@ -424,8 +416,13 @@ def test_ai_config_default_and_put(client):
     assert body["text"]["provider"] == "local"
     # AI image generation was removed — config is text-only now.
     assert "image" not in body
-    # key presence is surfaced for the inline key fields
-    assert set(body["key_status"]) == {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
+    # key presence is surfaced for the inline key fields (AI keys + the
+    # per-workspace Unsplash image key)
+    assert set(body["key_status"]) == {
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "UNSPLASH_ACCESS_KEY",
+    }
 
     saved = client.put(
         "/api/ai",
@@ -512,6 +509,132 @@ def test_x_account_enroll(client):
     assert x["accounts"] == ["main"] and all(k["set"] for k in x["keys"])
 
 
+def test_create_workspace_by_name(client):
+    # Name-first creation: a workspace exists immediately, no credentials yet.
+    row = client.post("/api/accounts", json={"label": "Crypto brand", "daily_post_cap": 5}).json()
+    assert row["label"] == "Crypto brand" and row["daily_post_cap"] == 5 and row["id"]
+    accounts = client.get("/api/accounts").json()
+    assert any(a["id"] == row["id"] and a["label"] == "Crypto brand" for a in accounts)
+
+
+def test_create_workspace_rejects_blank_and_duplicate(client):
+    assert client.post("/api/accounts", json={"label": "   "}).status_code == 422
+    client.post("/api/accounts", json={"label": "Dup"})
+    assert client.post("/api/accounts", json={"label": "Dup"}).status_code == 409
+
+
+def test_default_workspace_is_seeded(tmp_path):
+    config_dir = tmp_path / "niches"
+    config_dir.mkdir()
+    (config_dir / f"{NICHE}.json").write_text(json.dumps(NICHE_CONFIG))
+    app = create_app(tmp_path / "seed.db", config_dir)  # seeding on by default
+    client = TestClient(app)
+    accounts = client.get("/api/accounts").json()
+    assert [a["label"] for a in accounts] == ["Default"]
+    # Re-opening doesn't create a second Default.
+    client2 = TestClient(create_app(tmp_path / "seed.db", config_dir))
+    assert len(client2.get("/api/accounts").json()) == 1
+
+
+def test_ai_keys_are_per_workspace(client, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    a = client.post("/api/accounts", json={"label": "A"}).json()["id"]
+    b = client.post("/api/accounts", json={"label": "B"}).json()["id"]
+    # set an AI key for workspace A only (scoped, not global env)
+    r = client.post("/api/credentials?account=" + a, json={"key": "OPENAI_API_KEY", "value": "sk-a"})
+    assert r.status_code == 200
+    assert client.get("/api/ai?account=" + a).json()["key_status"]["OPENAI_API_KEY"] is True
+    assert client.get("/api/ai?account=" + b).json()["key_status"]["OPENAI_API_KEY"] is False
+    # scoped AI keys never leak into the process env
+    import os
+    assert os.environ.get("OPENAI_API_KEY") is None
+
+
+def test_x_credentials_are_per_workspace(client):
+    wid = client.post("/api/accounts", json={"label": "WSX"}).json()["id"]
+    assert any(a["id"] == wid and a["configured"] is False for a in client.get("/api/accounts").json())
+    r = client.post(
+        f"/api/accounts/{wid}/credentials",
+        json={"api_key": "k", "api_secret": "s", "access_token": "t", "access_token_secret": "ts"},
+    )
+    assert r.json()["configured"] is True
+    assert any(a["id"] == wid and a["configured"] is True for a in client.get("/api/accounts").json())
+
+
+def test_niches_are_a_shared_catalog_with_per_workspace_selection(client):
+    # Niches are shared: every workspace sees the whole catalog and selecting
+    # one only updates *that* workspace's followed list (no ownership claim), so
+    # two workspaces can follow the same niche and generate independently.
+    a = client.post("/api/accounts", json={"label": "A"}).json()["id"]
+    b = client.post("/api/accounts", json={"label": "B"}).json()["id"]
+
+    def followed(acct):
+        return set(client.get(f"/api/niches/followed?account={acct}").json()["followed"])
+
+    def catalog(acct):
+        return {n["slug"] for n in client.get(f"/api/niches?account={acct}").json()}
+
+    # Both workspaces see the identical full catalog.
+    assert catalog(a) == catalog(b)
+    assert NICHE in catalog(a)
+
+    # Selecting in A follows it for A only — never stamps ownership and never
+    # affects B's (empty) selection.
+    client.put("/api/niches/followed?account=" + a, json={"slugs": [NICHE]})
+    assert followed(a) == {NICHE}
+    assert followed(b) == set()
+    assert client.get(f"/api/niches/{NICHE}").json().get("account_id") is None
+
+    # B can follow the *same* niche; A keeps it. Both now follow it.
+    client.put("/api/niches/followed?account=" + b, json={"slugs": [NICHE]})
+    assert followed(a) == {NICHE}
+    assert followed(b) == {NICHE}
+
+    # The /api/niches followed flag is per workspace.
+    a_view = {n["slug"]: n["followed"] for n in client.get(f"/api/niches?account={a}").json()}
+    assert a_view[NICHE] is True
+
+    # Deselecting in A leaves B untouched (no shared release).
+    client.put("/api/niches/followed?account=" + a, json={"slugs": []})
+    assert followed(a) == set()
+    assert followed(b) == {NICHE}
+
+
+def test_queue_is_isolated_per_workspace_for_a_shared_niche(client):
+    # Two workspaces follow the same shared niche; each one's queue and pending
+    # count show only its own drafts (isolated by platform_account_id), so a
+    # shared niche never leaks drafts between workspaces.
+    a = client.post("/api/accounts", json={"label": "A"}).json()["id"]
+    b = client.post("/api/accounts", json={"label": "B"}).json()["id"]
+    client.put("/api/niches/followed?account=" + a, json={"slugs": [NICHE]})
+    client.put("/api/niches/followed?account=" + b, json={"slugs": [NICHE]})
+
+    pa = _add_post(client, status="draft", platform_account_id=a)
+    pb = _add_post(client, status="draft", platform_account_id=b)
+
+    assert [p["id"] for p in client.get("/api/posts?account=" + a).json()] == [pa]
+    assert [p["id"] for p in client.get("/api/posts?account=" + b).json()] == [pb]
+    assert client.get("/api/status?account=" + a).json()["queue_pending"] == 1
+    assert client.get("/api/status?account=" + b).json()["queue_pending"] == 1
+    # Unscoped (admin) view still sees both drafts.
+    assert len(client.get("/api/posts").json()) == 2
+
+
+def test_reset_workspace_clears_only_its_data(client):
+    acct = client.post("/api/accounts", json={"label": "WS"}).json()
+    wid = acct["id"]
+    # a draft owned by the workspace + a per-workspace setting
+    _add_post(client, status="draft", platform_account_id=wid)
+    client.patch("/api/settings?account=" + wid, json={"dry_run": False})
+    assert client.get("/api/status?account=" + wid).json()["dry_run"] is False
+
+    r = client.post(f"/api/accounts/{wid}/reset").json()
+    assert r["ok"] is True and r["deleted"]["generated_posts"] == 1
+    # workspace still exists; its settings reverted to default (dry-run on)
+    assert any(a["id"] == wid for a in client.get("/api/accounts").json())
+    assert client.get("/api/status?account=" + wid).json()["dry_run"] is True
+
+
 def test_reset_requires_confirm(client):
     _add_post(client, status="draft")
     assert client.post("/api/reset", json={"confirm": False}).status_code == 422
@@ -567,6 +690,9 @@ def test_reset_clear_credentials_wipes_secrets(client, monkeypatch):
     guardian = next(g for g in creds if g["platform"] == "The Guardian")
     assert not any(k["set"] for k in guardian["keys"])
     x = next(g for g in creds if g["type"] == "x_account")
-    assert x["accounts"] == []
+    # Reset re-seeds one credential-less Default workspace (the app always has a
+    # workspace), but the enrolled X credentials themselves are gone.
+    assert x["accounts"] == ["Default"]
+    assert not any(k["set"] for k in x["keys"])
     # nothing left to re-inject from the DB
     assert inject_stored_secrets(client.app.state.session_factory) == 0

@@ -15,6 +15,24 @@ export const NAV = [
   ['settings', 'Settings'],
 ];
 
+// Sidebar nav, grouped: "Workspace" tabs scope to the current workspace;
+// "Global" tabs (sources, raw data) are shared across all workspaces.
+export const NAV_GROUPS = [
+  ['Workspace', [
+    ['dashboard', 'Dashboard'],
+    ['niches', 'Niches'],
+    ['queue', 'Queue'],
+    ['schedule', 'Schedule'],
+    ['history', 'History'],
+    ['logs', 'Logs'],
+    ['settings', 'Settings'],
+  ]],
+  ['Global', [
+    ['sources', 'Sources'],
+    ['rawdata', 'Raw Data'],
+  ]],
+];
+
 // Fallback list until /api/niches loads (matches config/niches/*.json).
 export let NICHES = [
   'politics', 'finance', 'tech', 'business', 'ai', 'crypto', 'news', 'sports',

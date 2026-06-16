@@ -36,23 +36,34 @@ from opensocial.core.db import (
     Log,
     PostHistory,
     add_platform_account,
+    delete_platform_account,
+    delete_workspace,
+    ensure_default_workspace,
     enqueue_command,
     get_app_setting,
+    get_platform_account,
+    get_platform_account_by_label,
     list_platform_accounts,
     make_session_factory,
     published_today_count,
     reset_database,
+    reset_workspace,
     set_app_setting,
     source_statuses,
+    update_platform_account,
     upsert_source_status,
 )
 from opensocial.core.scheduler import ScheduleConfig, resolve_slots
 from opensocial.core.settings import (
     get_followed_niches,
+    get_scoped_setting,
+    has_scoped_secret,
     load_ai_config,
     resolve_settings,
     save_ai_config,
     set_followed_niches,
+    set_scoped_secret,
+    set_scoped_setting,
 )
 from opensocial.sources import available_sources, get_source
 
@@ -199,6 +210,13 @@ ALLOWED_SECRET_ENVS = {env for _, envs in CREDENTIAL_GROUPS for env in envs}
 # AI provider keys surfaced inline on the AI providers card (set/not-set).
 AI_KEY_ENVS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
 
+# Per-workspace credential keys (stored under ``ws:<id>:secret:<ENV>``, never
+# injected into ``os.environ``) whose set/not-set status the dashboard surfaces
+# via ``/api/ai``. AI keys authenticate text generation; Unsplash authenticates
+# image lookups for niches whose image source is Unsplash. The *source* API keys
+# (YouTube, Guardian, NASA…) stay global — set on the Sources tab.
+WORKSPACE_KEY_ENVS = (*AI_KEY_ENVS, "UNSPLASH_ACCESS_KEY")
+
 COMMAND_TYPES = {
     "fetch_sources",
     "generate_posts",
@@ -320,6 +338,17 @@ class XAccountIn(BaseModel):
     daily_post_cap: int | None = None
 
 
+class WorkspaceIn(BaseModel):
+    label: str  # the workspace name
+    daily_post_cap: int | None = None
+
+
+class AccountPatch(BaseModel):
+    label: str | None = None
+    daily_post_cap: int | None = None
+    clear_cap: bool = False  # set daily_post_cap back to unlimited
+
+
 class SchedulePut(BaseModel):
     windows: list[list[str]]
     posts_per_day: list[int]
@@ -340,6 +369,8 @@ class RandomizeIn(BaseModel):
 def create_app(
     db_path: str | Path = "opensocial.db",
     config_dir: str | Path = "config/niches",
+    *,
+    seed_default: bool = True,
 ) -> FastAPI:
     session_factory = make_session_factory(db_path)
     config_dir = Path(config_dir)
@@ -347,6 +378,10 @@ def create_app(
     os.environ.setdefault(
         "OPENSOCIAL_KEYFILE", str(Path(db_path).resolve().parent / "opensocial.key")
     )
+    # The dashboard always operates inside a workspace, so guarantee one exists.
+    if seed_default:
+        with session_factory() as s:
+            ensure_default_workspace(s)
 
     app = FastAPI(title="OpenX API")
     app.state.session_factory = session_factory
@@ -381,18 +416,41 @@ def create_app(
         # First secret saved from the dashboard: create the local keyfile.
         return keyfile_secret(create=True)
 
+    def account_niche_slugs(account_id: str | None) -> list[str] | None:
+        """The niches a workspace *works in* — its followed set — or ``None``.
+
+        Niches are a shared catalog: any workspace may select (follow) any
+        niche, and two workspaces following the same niche generate
+        independently (per-workspace AI config + account). A workspace's active
+        niches are therefore exactly the ones it has selected, not a private
+        slice of the catalog. ``None``/empty ``account_id`` means "no scoping".
+
+        This scopes *config-level* views (schedule, logs, the overview funnel).
+        Per-workspace *draft/post* data is isolated by ``platform_account_id``
+        instead, so the same niche followed by two workspaces never leaks drafts
+        between them.
+        """
+        if not account_id:
+            return None
+        with session_factory() as s:
+            return list(get_followed_niches(s, account_id))
+
     # ---- status & settings ------------------------------------------------
 
     @app.get("/api/status")
-    def status():
+    def status(account: str | None = None):
         with session_factory() as s:
-            settings = resolve_settings(s)
-            published = published_today_count(s)
-            queue_pending = s.execute(
-                select(func.count()).select_from(GeneratedPost).where(
-                    GeneratedPost.status == "draft"
-                )
-            ).scalar()
+            settings = resolve_settings(s, account)
+            published = published_today_count(s, platform_account_id=account) \
+                if account else published_today_count(s)
+            # Drafts belong to the workspace that generated them, isolated by
+            # platform_account_id (niches are shared across workspaces).
+            q = select(func.count()).select_from(GeneratedPost).where(
+                GeneratedPost.status == "draft"
+            )
+            if account:
+                q = q.where(GeneratedPost.platform_account_id == account)
+            queue_pending = s.execute(q).scalar()
         return {
             "dry_run": settings.dry_run,
             "app_mode": settings.app_mode,
@@ -405,25 +463,22 @@ def create_app(
         }
 
     @app.patch("/api/settings")
-    def patch_settings(patch: SettingsPatch):
+    def patch_settings(patch: SettingsPatch, account: str | None = None):
+        # dry_run / app_mode are per workspace; fetch cadence stays global.
         with session_factory() as s:
             if patch.dry_run is not None:
-                set_app_setting(s, "dry_run", "true" if patch.dry_run else "false")
+                set_scoped_setting(s, account, "dry_run", "true" if patch.dry_run else "false")
             if patch.app_mode is not None:
                 if patch.app_mode not in ("manual", "auto"):
                     raise HTTPException(422, "app_mode must be 'manual' or 'auto'")
-                set_app_setting(s, "app_mode", patch.app_mode)
-            if patch.global_daily_cap is not None:
-                if patch.global_daily_cap < 0:
-                    raise HTTPException(422, "global_daily_cap must be >= 0")
-                set_app_setting(s, "global_daily_cap", str(patch.global_daily_cap))
+                set_scoped_setting(s, account, "app_mode", patch.app_mode)
             if patch.autopilot_fetch_minutes is not None:
                 if patch.autopilot_fetch_minutes < 0:
                     raise HTTPException(422, "autopilot_fetch_minutes must be >= 0")
                 set_app_setting(
                     s, "autopilot_fetch_minutes", str(patch.autopilot_fetch_minutes)
                 )
-        return status()
+        return status(account)
 
     @app.post("/api/reset")
     def reset(body: ResetIn):
@@ -431,7 +486,14 @@ def create_app(
         if not body.confirm:
             raise HTTPException(422, "confirm must be true to reset the database")
         with session_factory() as s:
-            deleted = reset_database(s, clear_credentials=body.clear_credentials)
+            deleted = reset_database(
+                s, clear_credentials=body.clear_credentials, config_dir=config_dir
+            )
+        # Clearing credentials wipes every workspace; re-seed the default one so
+        # the app always has a workspace to operate in (same guarantee as at
+        # startup). Idempotent when an account survived the reset.
+        with session_factory() as s:
+            ensure_default_workspace(s)
         # Drop in-process secrets too so cleared keys stop being used immediately.
         if body.clear_credentials:
             for env in ALLOWED_SECRET_ENVS:
@@ -441,21 +503,27 @@ def create_app(
     # ---- overview ----------------------------------------------------------
 
     @app.get("/api/overview")
-    def overview():
+    def overview(account: str | None = None):
         start, end = _today_bounds()
         with session_factory() as s:
-            published_by_niche = dict(
-                s.execute(
-                    select(GeneratedPost.niche_slug, func.count())
-                    .join(PostHistory, PostHistory.generated_post_id == GeneratedPost.id)
-                    .where(
-                        PostHistory.status == "success",
-                        PostHistory.attempted_at >= start,
-                        PostHistory.attempted_at < end,
-                    )
-                    .group_by(GeneratedPost.niche_slug)
-                ).all()
+            # Published-per-niche is this workspace's own publishes (isolated by
+            # platform_account_id); content found/candidates are shared (one
+            # fetch pass serves every workspace) so they stay global per niche.
+            pub_stmt = (
+                select(GeneratedPost.niche_slug, func.count())
+                .join(PostHistory, PostHistory.generated_post_id == GeneratedPost.id)
+                .where(
+                    PostHistory.status == "success",
+                    PostHistory.attempted_at >= start,
+                    PostHistory.attempted_at < end,
+                )
+                .group_by(GeneratedPost.niche_slug)
             )
+            if account:
+                pub_stmt = pub_stmt.where(
+                    PostHistory.platform_account_id == account
+                )
+            published_by_niche = dict(s.execute(pub_stmt).all())
             found_by_niche = dict(
                 s.execute(
                     select(ContentItemNiche.niche_slug, func.count())
@@ -481,33 +549,44 @@ def create_app(
                     .group_by(ContentItemNiche.niche_slug)
                 ).all()
             )
-            spend = s.execute(
-                select(func.coalesce(func.sum(PostHistory.cost_estimate), 0.0)).where(
-                    PostHistory.attempted_at >= start,
-                    PostHistory.attempted_at < end,
+            spend_stmt = select(
+                func.coalesce(func.sum(PostHistory.cost_estimate), 0.0)
+            ).where(
+                PostHistory.attempted_at >= start,
+                PostHistory.attempted_at < end,
+            )
+            if account:
+                spend_stmt = spend_stmt.where(
+                    PostHistory.platform_account_id == account
                 )
-            ).scalar()
-            with_link = s.execute(
-                select(func.count()).select_from(PostHistory).where(
-                    PostHistory.attempted_at >= start,
-                    PostHistory.attempted_at < end,
-                    PostHistory.included_source_link.is_(True),
-                    PostHistory.status == "success",
+            spend = s.execute(spend_stmt).scalar()
+            link_stmt = select(func.count()).select_from(PostHistory).where(
+                PostHistory.attempted_at >= start,
+                PostHistory.attempted_at < end,
+                PostHistory.included_source_link.is_(True),
+                PostHistory.status == "success",
+            )
+            if account:
+                link_stmt = link_stmt.where(
+                    PostHistory.platform_account_id == account
                 )
-            ).scalar()
-            eligible = s.execute(
-                select(func.count()).select_from(GeneratedPost).where(
-                    GeneratedPost.status == "draft"
+            with_link = s.execute(link_stmt).scalar()
+            eligible_stmt = select(func.count()).select_from(GeneratedPost).where(
+                GeneratedPost.status == "draft"
+            )
+            if account:
+                eligible_stmt = eligible_stmt.where(
+                    GeneratedPost.platform_account_id == account
                 )
-            ).scalar()
+            eligible = s.execute(eligible_stmt).scalar()
             logs = list(
                 s.execute(
                     select(Log).order_by(Log.id.desc()).limit(10)
                 ).scalars()
             )
             statuses = source_statuses(s)
-            settings = resolve_settings(s)
-            selected = set(get_followed_niches(s))
+            settings = resolve_settings(s, account)
+            selected = set(get_followed_niches(s, account))
 
         all_niches = niches()
         # Total = every installed source plugin; active = those explicitly
@@ -555,8 +634,10 @@ def create_app(
                 }
             )
 
+        # published_by_niche is already scoped to this workspace's publishes.
+        published_today = sum(published_by_niche.values())
         return {
-            "published_today": sum(published_by_niche.values()),
+            "published_today": published_today,
             "global_daily_cap": settings.global_daily_cap,
             "pending_total": int(eligible or 0),
             "sources_active": enabled_sources,
@@ -577,9 +658,9 @@ def create_app(
     # ---- niches ------------------------------------------------------------
 
     @app.get("/api/niches")
-    def list_niches():
+    def list_niches(account: str | None = None):
         with session_factory() as s:
-            followed = set(get_followed_niches(s))
+            followed = set(get_followed_niches(s, account))
             statuses = source_statuses(s)
 
         def has_enabled_source(n) -> bool:
@@ -597,24 +678,32 @@ def create_app(
                 "enabled": n.enabled,
                 "followed": n.slug in followed,
                 "has_enabled_source": has_enabled_source(n),
+                "account_id": n.account_id,
             }
+            # Niches are a shared catalog — every workspace sees all of them.
+            # ``followed`` is per-workspace, so selection still differs per
+            # workspace even though the catalog is common.
             for n in niches()
         ]
 
     # Declared before ``/api/niches/{slug}`` so the path param doesn't match it.
     @app.get("/api/niches/followed")
-    def get_followed():
+    def get_followed(account: str | None = None):
         with session_factory() as s:
-            return {"followed": get_followed_niches(s)}
+            return {"followed": get_followed_niches(s, account)}
 
     @app.put("/api/niches/followed")
-    def put_followed(body: FollowedIn):
+    def put_followed(body: FollowedIn, account: str | None = None):
         valid = {n.slug for n in niches()}
         unknown = [s for s in body.slugs if s not in valid]
         if unknown:
             raise HTTPException(422, f"unknown niche slug(s): {', '.join(unknown)}")
         with session_factory() as s:
-            saved = set_followed_niches(s, body.slugs)
+            saved = set_followed_niches(s, body.slugs, account)
+        # Niches are a shared catalog: selecting one only updates this
+        # workspace's followed list (namespaced per workspace). No ownership is
+        # claimed, so multiple workspaces can follow the same niche and each
+        # generates independently (own AI config + posting account).
         return {"followed": saved}
 
     @app.get("/api/niches/{slug}")
@@ -698,13 +787,17 @@ def create_app(
     # ---- schedule (resolved slots) ------------------------------------------
 
     @app.get("/api/schedule")
-    def schedule():
+    def schedule(account: str | None = None):
         now = datetime.now(timezone.utc)
         out = []
+        scoped = account_niche_slugs(account)  # this workspace's followed niches
         with session_factory() as s:
             for n in niches():
                 # Only niches that have a schedule block are "on the schedule".
                 if not (n.raw or {}).get("schedule"):
+                    continue
+                # Shared catalog: a workspace's schedule is its followed niches.
+                if scoped is not None and n.slug not in scoped:
                     continue
                 cfg = ScheduleConfig.from_niche(n.raw)
                 slots = resolve_slots(cfg, n.slug, now)
@@ -712,7 +805,9 @@ def create_app(
                 # many of today's slots have elapsed (the engine no longer catches
                 # these up — only slots that *just* came due publish).
                 due = sum(1 for t in slots if t <= now)
-                published = published_today_count(s, niche_slug=n.slug, day=now)
+                published = published_today_count(
+                    s, niche_slug=n.slug, platform_account_id=account, day=now
+                )
                 out.append(
                     {
                         "slug": n.slug,
@@ -735,7 +830,12 @@ def create_app(
     # ---- posts (queue) -------------------------------------------------------
 
     @app.get("/api/posts")
-    def posts(niche: str | None = None, status: str | None = None, limit: int = 200):
+    def posts(
+        niche: str | None = None,
+        status: str | None = None,
+        account: str | None = None,
+        limit: int = 200,
+    ):
         stmt = (
             select(GeneratedPost, ContentItemRow.source_name)
             .join(
@@ -748,6 +848,10 @@ def create_app(
         )
         if niche:
             stmt = stmt.where(GeneratedPost.niche_slug == niche)
+        # Drafts are isolated per workspace by the generating account (niches
+        # are shared, so two workspaces' drafts for the same niche must not mix).
+        if account:
+            stmt = stmt.where(GeneratedPost.platform_account_id == account)
         if status:
             stmt = stmt.where(GeneratedPost.status == status)
         with session_factory() as s:
@@ -882,7 +986,12 @@ def create_app(
     # ---- history -------------------------------------------------------------
 
     @app.get("/api/history")
-    def history(days: int = 1, status: str | None = None, limit: int = 300):
+    def history(
+        days: int = 1,
+        status: str | None = None,
+        account: str | None = None,
+        limit: int = 300,
+    ):
         since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
         stmt = (
             select(PostHistory, GeneratedPost)
@@ -893,6 +1002,10 @@ def create_app(
         )
         if status:
             stmt = stmt.where(PostHistory.status == status)
+        if account:
+            # Scope on the account recorded at publish time (resilient to later
+            # niche re-assignment).
+            stmt = stmt.where(PostHistory.platform_account_id == account)
         with session_factory() as s:
             rows = s.execute(stmt).all()
             return [
@@ -916,14 +1029,31 @@ def create_app(
     # ---- logs ------------------------------------------------------------------
 
     @app.get("/api/logs")
-    def logs(level: str | None = None, after_id: int = 0, limit: int = 300):
-        stmt = select(Log).order_by(Log.id.desc()).limit(min(limit, 1000))
+    def logs(
+        level: str | None = None,
+        after_id: int = 0,
+        limit: int = 300,
+        account: str | None = None,
+    ):
+        # Scope to the workspace: keep lines whose ``[niche]`` prefix is in the
+        # workspace's niches, plus prefix-less global service lines.
+        scoped = account_niche_slugs(account)
+        cap = min(limit, 1000)
+        stmt = select(Log).order_by(Log.id.desc()).limit(cap if scoped is None else 1000)
         if level and level != "all":
             stmt = stmt.where(Log.level == level)
         if after_id:
             stmt = stmt.where(Log.id > after_id)
         with session_factory() as s:
             rows = list(s.execute(stmt).scalars())
+        if scoped is not None:
+            keep = set(scoped)
+
+            def _visible(message: str) -> bool:
+                m = _NICHE_PREFIX.match(message)
+                return m.group(1) in keep if m else True
+
+            rows = [r for r in rows if _visible(r.message)][:cap]
         rows.reverse()
         return [
             {
@@ -1097,27 +1227,33 @@ def create_app(
         _origin_remove(body.niche, name, spec, body.value)
         return {"name": name, "niche": body.niche, "removed": body.value}
 
-    # ---- global AI config ---------------------------------------------------
+    # ---- per-workspace AI config (text); source/AI keys stay global ---------
+
+    def _ai_key_status(s, account: str | None) -> dict:
+        # Per-workspace keys (AI + Unsplash): present if the workspace has its
+        # own (or a legacy global default), or the env var is set.
+        return {
+            env: has_scoped_secret(s, account, env) or bool(os.environ.get(env))
+            for env in WORKSPACE_KEY_ENVS
+        }
 
     @app.get("/api/ai")
-    def get_ai():
+    def get_ai(account: str | None = None):
         with session_factory() as s:
-            cfg = load_ai_config(s)
-        # Surface which AI keys are present so the card can show set/not-set
-        # without exposing the secrets themselves.
-        cfg["key_status"] = {
-            env: bool(os.environ.get(env)) for env in AI_KEY_ENVS
-        }
+            cfg = load_ai_config(s, account)
+            # Surface which AI keys are present so the card can show set/not-set
+            # without exposing the secrets themselves.
+            cfg["key_status"] = _ai_key_status(s, account)
         return cfg
 
     @app.put("/api/ai")
-    def put_ai(body: AiConfigIn):
+    def put_ai(body: AiConfigIn, account: str | None = None):
         text = body.text or {}
         if (text.get("provider") or "").lower() == "local" and not (text.get("endpoint") or "").strip():
             raise HTTPException(422, "endpoint is required for the local provider")
         with session_factory() as s:
-            saved = save_ai_config(s, {"text": text})
-        saved["key_status"] = {env: bool(os.environ.get(env)) for env in AI_KEY_ENVS}
+            saved = save_ai_config(s, {"text": text}, account)
+            saved["key_status"] = _ai_key_status(s, account)
         return saved
 
     # ---- commands --------------------------------------------------------------------
@@ -1165,15 +1301,19 @@ def create_app(
     def credentials():
         with session_factory() as s:
             accounts = list_platform_accounts(s, platform="x")
+        # "set" reflects whether any account actually has credentials enrolled —
+        # not merely that an account row exists. The always-present default
+        # workspace starts credential-less, so bool(accounts) would lie.
+        has_creds = any(a.credentials_encrypted for a in accounts)
         groups = [
             {
                 "platform": "Twitter / X",
                 "type": "x_account",
                 "keys": [
-                    {"name": "api_key", "set": bool(accounts)},
-                    {"name": "api_secret", "set": bool(accounts)},
-                    {"name": "access_token", "set": bool(accounts)},
-                    {"name": "access_token_secret", "set": bool(accounts)},
+                    {"name": "api_key", "set": has_creds},
+                    {"name": "api_secret", "set": has_creds},
+                    {"name": "access_token", "set": has_creds},
+                    {"name": "access_token_secret", "set": has_creds},
                 ],
                 "accounts": [a.account_label for a in accounts],
             }
@@ -1191,7 +1331,14 @@ def create_app(
         return groups
 
     @app.post("/api/credentials")
-    def set_credential(body: SecretIn):
+    def set_credential(body: SecretIn, account: str | None = None):
+        """Store an encrypted credential.
+
+        With ``account`` set the key is stored **per workspace**
+        (``ws:<id>:secret:<ENV>``) and is *not* injected into the process env —
+        used for AI keys. Without ``account`` it's a global secret (injected into
+        ``os.environ``) — used for the shared source API keys.
+        """
         if body.key not in ALLOWED_SECRET_ENVS:
             raise HTTPException(422, f"unknown credential key {body.key!r}")
         if not body.value.strip():
@@ -1200,9 +1347,12 @@ def create_app(
 
         with session_factory() as s:
             key = secret_key_or_400(s)
-            blob = encrypt_credentials({"value": body.value.strip()}, key)
-            set_app_setting(s, f"secret:{body.key}", blob.decode("ascii"))
-        os.environ[body.key] = body.value.strip()
+            if account:
+                set_scoped_secret(s, account, body.key, body.value.strip(), key)
+            else:
+                blob = encrypt_credentials({"value": body.value.strip()}, key)
+                set_app_setting(s, f"secret:{body.key}", blob.decode("ascii"))
+                os.environ[body.key] = body.value.strip()
         return {"key": body.key, "set": True}
 
     @app.post("/api/credentials/x")
@@ -1220,12 +1370,140 @@ def create_app(
         with session_factory() as s:
             key = secret_key_or_400(s)
             blob = encrypt_credentials(creds, key)
-            add_platform_account(
+            acct = add_platform_account(
                 s,
                 account_label=body.label,
                 credentials_encrypted=blob,
                 daily_post_cap=body.daily_post_cap,
             )
-        return {"label": body.label, "set": True}
+            account_id = acct.id
+        return {"id": account_id, "label": body.label, "set": True}
+
+    # ---- accounts (multi-account management) --------------------------------
+
+    @app.get("/api/accounts")
+    def list_accounts():
+        """Enrolled X accounts with their niche count and today's publish count."""
+        now = datetime.now(timezone.utc)
+        with session_factory() as s:
+            accounts = list_platform_accounts(s, platform="x")
+            out = []
+            for a in accounts:
+                # Niches are shared; a workspace's count is what it has selected.
+                niche_count = len(get_followed_niches(s, a.id))
+                out.append(
+                    {
+                        "id": a.id,
+                        "label": a.account_label,
+                        "platform": a.platform,
+                        "daily_post_cap": a.daily_post_cap,
+                        "niche_count": niche_count,
+                        # True once X credentials are enrolled (non-empty blob).
+                        "configured": bool(a.credentials_encrypted),
+                        "published_today": published_today_count(
+                            s, platform_account_id=a.id, day=now
+                        ),
+                    }
+                )
+        return out
+
+    @app.post("/api/accounts")
+    def create_account(body: WorkspaceIn):
+        """Create a workspace by name (an X account with no credentials yet).
+
+        This is the name-first flow: the workspace exists immediately so the
+        user can configure its niches/AI/settings, and X credentials are
+        enrolled later (Settings → Credentials) by re-using this label. Until
+        credentials are enrolled the workspace can't publish live — only
+        simulate in dry-run, which is the safe default.
+        """
+        label = body.label.strip()
+        if not label:
+            raise HTTPException(422, "workspace name must not be empty")
+        if body.daily_post_cap is not None and body.daily_post_cap < 0:
+            raise HTTPException(422, "daily_post_cap must be >= 0")
+        with session_factory() as s:
+            if get_platform_account_by_label(s, label) is not None:
+                raise HTTPException(409, f"a workspace named {label!r} already exists")
+            acct = add_platform_account(
+                s,
+                account_label=label,
+                credentials_encrypted=b"",  # enrolled later
+                daily_post_cap=body.daily_post_cap,
+            )
+            return {
+                "id": acct.id,
+                "label": acct.account_label,
+                "daily_post_cap": acct.daily_post_cap,
+            }
+
+    @app.patch("/api/accounts/{account_id}")
+    def patch_account(account_id: str, body: AccountPatch):
+        if body.label is not None and not body.label.strip():
+            raise HTTPException(422, "label must not be empty")
+        if body.daily_post_cap is not None and body.daily_post_cap < 0:
+            raise HTTPException(422, "daily_post_cap must be >= 0")
+        with session_factory() as s:
+            acct = update_platform_account(
+                s,
+                account_id,
+                account_label=body.label,
+                daily_post_cap=body.daily_post_cap,
+                clear_cap=body.clear_cap,
+            )
+            if acct is None:
+                raise HTTPException(404, "account not found")
+            return {
+                "id": acct.id,
+                "label": acct.account_label,
+                "daily_post_cap": acct.daily_post_cap,
+            }
+
+    @app.post("/api/accounts/{account_id}/credentials")
+    def set_account_credentials(account_id: str, body: XAccountIn):
+        """Enroll/replace *this workspace's* X credentials (per workspace).
+
+        The workspace is one X account, so this writes the four encrypted X
+        secrets onto that account — not a global, all-accounts card."""
+        from opensocial.core.secrets import encrypt_credentials
+
+        creds = {
+            "api_key": body.api_key,
+            "api_secret": body.api_secret,
+            "access_token": body.access_token,
+            "access_token_secret": body.access_token_secret,
+        }
+        if not all(v.strip() for v in creds.values()):
+            raise HTTPException(422, "all four X credentials are required")
+        with session_factory() as s:
+            if get_platform_account(s, account_id) is None:
+                raise HTTPException(404, "account not found")
+            key = secret_key_or_400(s)
+            blob = encrypt_credentials(creds, key)
+            update_platform_account(s, account_id, credentials_encrypted=blob)
+        return {"id": account_id, "configured": True}
+
+    @app.post("/api/accounts/{account_id}/reset")
+    def reset_account(account_id: str):
+        """Reset just this workspace: clear its drafts, history, and settings.
+
+        The workspace itself, its niche config files, the shared content pool,
+        and sources are kept — unlike ``POST /api/reset`` which wipes the DB."""
+        with session_factory() as s:
+            if get_platform_account(s, account_id) is None:
+                raise HTTPException(404, "account not found")
+            deleted = reset_workspace(s, account_id, config_dir=config_dir)
+        return {"ok": True, "id": account_id, "deleted": deleted}
+
+    @app.delete("/api/accounts/{account_id}")
+    def remove_account(account_id: str):
+        """Delete a workspace (= account) and everything scoped to it: its
+        niche config files, drafts + history, and per-workspace settings. The
+        shared content pool and global sources are left intact."""
+        with session_factory() as s:
+            if get_platform_account(s, account_id) is None:
+                raise HTTPException(404, "account not found")
+            deleted = delete_workspace(s, account_id, config_dir=config_dir)
+        return {"ok": True, "id": account_id, "deleted": deleted}
 
     return app

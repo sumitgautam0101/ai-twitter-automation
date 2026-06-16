@@ -23,17 +23,68 @@ from opensocial.core.config import NicheConfig, load_all_niches, load_niche
 from opensocial.core.db import (
     GeneratedPost,
     add_platform_account,
+    delete_platform_account,
+    delete_workspace,
+    get_platform_account,
+    get_platform_account_by_label,
     list_platform_accounts,
     make_session_factory,
     store_items,
 )
-from opensocial.core.engine import load_credentials, publish_post, run_due_slots
+from opensocial.core.engine import (
+    load_credentials_for_account,
+    publish_post,
+    resolve_account_for_niche,
+    run_due_slots,
+)
 from opensocial.core.filtering import candidate_queue, filter_niche
 from opensocial.core.generate import generate_for_niche, generate_independent
 from opensocial.core.settings import Settings
 from opensocial.sources import available_sources, get_source
 
 app = typer.Typer(help="OpenX automation service", no_args_is_help=True)
+
+
+def _publish_all_workspaces(session_factory, config_dir: str) -> int:
+    """Publish due slots for every workspace using its own settings + account.
+
+    Each workspace (X account) publishes the niches it follows under its own
+    dry-run / app-mode / cap and as its own account — niches are a shared
+    catalog, so two workspaces can follow the same niche and publish
+    independently. Falls back to legacy global settings over all niches when no
+    workspace exists yet (pre-workspace install). Returns posts published.
+    """
+    from opensocial.core.db import list_platform_accounts
+    from opensocial.core.settings import get_followed_niches, resolve_settings
+
+    niches = load_all_niches(config_dir)
+    published = 0
+    with session_factory() as s:
+        accounts = list_platform_accounts(s)
+
+    if not accounts:
+        # Legacy single-setup: one global settings pass over all niches.
+        with session_factory() as s:
+            settings = resolve_settings(s, None)
+        for n in niches:
+            if not n.enabled:
+                continue
+            with session_factory() as s:
+                published += len(run_due_slots(s, n.slug, n.raw, settings))
+        return published
+
+    for acct in accounts:
+        with session_factory() as s:
+            ws_settings = resolve_settings(s, acct.id)
+            followed = set(get_followed_niches(s, acct.id))
+        for n in niches:
+            if n.slug not in followed or not n.enabled:
+                continue
+            with session_factory() as s:
+                published += len(
+                    run_due_slots(s, n.slug, n.raw, ws_settings, account=acct)
+                )
+    return published
 
 
 async def _fetch_niche(niche: NicheConfig, session_factory) -> None:
@@ -288,7 +339,108 @@ def account_list(
         return
     for a in accounts:
         cap = f" cap={a.daily_post_cap}" if a.daily_post_cap else ""
-        typer.echo(f"{a.platform}: {a.account_label}{cap}")
+        typer.echo(f"{a.platform}: {a.account_label}{cap}  ({a.id})")
+
+
+@app.command(name="account-rm")
+def account_rm(
+    label: str = typer.Option(..., "--label", help="Label of the account to remove."),
+    db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
+) -> None:
+    """Remove an enrolled X account by label."""
+    session_factory = make_session_factory(db)
+    with session_factory() as session:
+        acct = get_platform_account_by_label(session, label)
+        if acct is None:
+            typer.echo(f"no account labelled '{label}'", err=True)
+            raise typer.Exit(1)
+        delete_platform_account(session, acct.id)
+    typer.echo(f"removed X account '{label}'")
+
+
+@app.command(name="workspace-list")
+def workspace_list(
+    db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
+) -> None:
+    """List workspaces (each is an X account) and their followed-niche counts."""
+    from opensocial.core.settings import get_followed_niches
+
+    session_factory = make_session_factory(db)
+    with session_factory() as session:
+        accounts = list_platform_accounts(session)
+        if not accounts:
+            typer.echo("no workspaces — create one with 'account-add'")
+            return
+        for a in accounts:
+            # Niches are shared; a workspace's count is the niches it follows.
+            n = len(get_followed_niches(session, a.id))
+            cap = f" cap={a.daily_post_cap}" if a.daily_post_cap else ""
+            typer.echo(f"{a.account_label}{cap} — {n} niche(s)  ({a.id})")
+
+
+@app.command(name="workspace-rm")
+def workspace_rm(
+    label: str = typer.Option(..., "--label", help="Workspace (account) label."),
+    db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
+) -> None:
+    """Delete a workspace and everything scoped to it (account, its niches,
+    drafts, history, and per-workspace settings). The shared content pool and
+    sources are left intact."""
+    session_factory = make_session_factory(db)
+    with session_factory() as session:
+        acct = get_platform_account_by_label(session, label)
+        if acct is None:
+            typer.echo(f"no workspace labelled '{label}'", err=True)
+            raise typer.Exit(1)
+        deleted = delete_workspace(session, acct.id, config_dir=config_dir)
+    typer.echo(f"deleted workspace '{label}': {deleted}")
+
+
+@app.command(name="niche-account")
+def niche_account(
+    niche: str = typer.Option(..., "--niche", "-n", help="Niche slug to bind."),
+    account: str = typer.Option(
+        None, "--account", help="Account label to bind (omit with --clear)."
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Unassign the niche's account instead."
+    ),
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
+    db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
+) -> None:
+    """Bind a niche to an X account (writes ``account_id`` into its JSON config)."""
+    import json
+
+    path = Path(config_dir) / f"{niche}.json"
+    if not path.exists():
+        typer.echo(f"no niche config at {path}", err=True)
+        raise typer.Exit(1)
+
+    account_id: str | None = None
+    if not clear:
+        if not account:
+            typer.echo("pass --account <label> or --clear", err=True)
+            raise typer.Exit(1)
+        session_factory = make_session_factory(db)
+        with session_factory() as session:
+            acct = get_platform_account_by_label(session, account)
+            if acct is None:
+                typer.echo(f"no account labelled '{account}'", err=True)
+                raise typer.Exit(1)
+            account_id = acct.id
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if clear:
+        data.pop("account_id", None)
+    else:
+        data["account_id"] = account_id
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    if clear:
+        typer.echo(f"[{niche}] account unassigned")
+    else:
+        typer.echo(f"[{niche}] bound to account '{account}'")
 
 
 @app.command()
@@ -301,21 +453,50 @@ def publish(
     ),
     db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
 ) -> None:
-    """Publish the posts due right now for one or all niches (one-shot)."""
-    settings = Settings.from_env()
-    _mode_banner(settings)
+    """Publish the posts due right now for one or all niches (one-shot).
+
+    Niches are a shared catalog: every workspace publishes the niches it follows
+    as its own account under its own settings (dry-run / mode). Falls back to a
+    single legacy pass when no workspace exists yet.
+    """
+    from opensocial.core.db import list_platform_accounts
+    from opensocial.core.settings import get_followed_niches, resolve_settings
+
     niches = _resolve_niches(niche, config_dir)
     session_factory = make_session_factory(db)
-    for n in niches:
-        with session_factory() as session:
-            creds = load_credentials(session, settings)
-            outcomes = run_due_slots(session, n.slug, n.raw, settings, credentials=creds)
+    with session_factory() as session:
+        accounts = list_platform_accounts(session)
+
+    def _emit(slug: str, outcomes, *, label: str | None = None):
+        tag = f"{slug}@{label}" if label else slug
         if not outcomes:
-            typer.echo(f"[{n.slug}] nothing due")
-            continue
+            typer.echo(f"[{tag}] nothing due")
+            return
         for o in outcomes:
             verb = "would post" if o.dry_run else ("posted" if o.ok else "FAILED")
-            typer.echo(f"[{n.slug}] {verb} <{o.post_type}> {o.post_id} (${o.cost:.3f})")
+            typer.echo(f"[{tag}] {verb} <{o.post_type}> {o.post_id} (${o.cost:.3f})")
+
+    if not accounts:
+        with session_factory() as session:
+            settings = resolve_settings(session, None)
+        for n in niches:
+            with session_factory() as session:
+                outcomes = run_due_slots(session, n.slug, n.raw, settings)
+            _emit(n.slug, outcomes)
+        return
+
+    for acct in accounts:
+        with session_factory() as session:
+            ws_settings = resolve_settings(session, acct.id)
+            followed = set(get_followed_niches(session, acct.id))
+        for n in niches:
+            if n.slug not in followed:
+                continue
+            with session_factory() as session:
+                outcomes = run_due_slots(
+                    session, n.slug, n.raw, ws_settings, account=acct
+                )
+            _emit(n.slug, outcomes, label=acct.account_label)
 
 
 @app.command(name="post-now")
@@ -334,8 +515,28 @@ def post_now(
             typer.echo(f"No generated post {post_id}", err=True)
             raise typer.Exit(1)
         niches = _resolve_niches(post.niche_slug, config_dir)
-        creds = load_credentials(session, settings)
-        outcome = publish_post(session, post, niches[0].raw, settings, credentials=creds)
+        config = niches[0].raw if niches else {}
+        account = (
+            get_platform_account(session, post.platform_account_id)
+            if post.platform_account_id
+            else None
+        ) or resolve_account_for_niche(session, config)
+        if account is None and not settings.dry_run:
+            typer.echo(
+                f"[{post.niche_slug}] no account assigned — cannot publish",
+                err=True,
+            )
+            raise typer.Exit(1)
+        account_id = account.id if account is not None else None
+        creds = (
+            load_credentials_for_account(session, settings, account_id)
+            if account_id
+            else None
+        )
+        outcome = publish_post(
+            session, post, config, settings, credentials=creds,
+            platform_account_id=account_id,
+        )
     verb = "would post" if outcome.dry_run else ("posted" if outcome.ok else "FAILED")
     typer.echo(f"[{post.niche_slug}] {verb} {outcome.post_id}: {outcome.error or 'ok'}")
 
@@ -378,20 +579,13 @@ def run(
         if not guard.acquire(blocking=False):
             return
         try:
-            # Re-resolve each tick so dashboard toggles apply without restart.
-            with session_factory() as session:
-                settings = resolve_settings(session)
-            process_commands(session_factory, config_dir=config_dir, settings=settings)
+            process_commands(session_factory, config_dir=config_dir)
             niches = load_all_niches(config_dir)
             # Resolve any approvals left past their timeout before publishing.
             with session_factory() as session:
                 sweep_timeouts(session, {n.slug: n.raw for n in niches})
-            for n in niches:
-                if not n.enabled:
-                    continue
-                with session_factory() as session:
-                    creds = load_credentials(session, settings)
-                    run_due_slots(session, n.slug, n.raw, settings, credentials=creds)
+            # Publish per workspace, each under its own settings + account.
+            _publish_all_workspaces(session_factory, config_dir)
         finally:
             guard.release()
 
@@ -449,30 +643,16 @@ def serve(
         if not guard.acquire(blocking=False):
             return
         try:
-            with session_factory() as session:
-                settings = resolve_settings(session)
-            ran = process_commands(
-                session_factory, config_dir=config_dir, settings=settings
-            )
+            ran = process_commands(session_factory, config_dir=config_dir)
             # Autopilot: keep the draft queue topped up with fresh data inside
-            # the day's posting window (no-op outside the window / manual mode).
-            autopilot_refresh(
-                session_factory, config_dir=config_dir, settings=settings
-            )
+            # the posting window (no-op outside the window / no auto workspaces).
+            # Fetch is shared; generation runs per auto-mode workspace.
+            autopilot_refresh(session_factory, config_dir=config_dir)
             niches = load_all_niches(config_dir)
             with session_factory() as session:
                 sweep_timeouts(session, {n.slug: n.raw for n in niches})
-            published = 0
-            for n in niches:
-                if not n.enabled:
-                    continue
-                with session_factory() as session:
-                    creds = load_credentials(session, settings)
-                    published += len(
-                        run_due_slots(
-                            session, n.slug, n.raw, settings, credentials=creds
-                        )
-                    )
+            # Publish per workspace, each under its own settings + account.
+            published = _publish_all_workspaces(session_factory, config_dir)
             if verbose and (ran or published):
                 typer.echo(
                     f"[{datetime.now():%H:%M:%S}] tick — "

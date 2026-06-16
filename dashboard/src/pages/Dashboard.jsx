@@ -290,8 +290,9 @@ function SetupGuide({ setup }) {
 }
 
 export default function Dashboard() {
-  const { data: ov } = usePoll('/api/overview', 5000);
-  const { data: sched } = usePoll('/api/schedule', 60000);
+  const { withAccount } = useApp();
+  const { data: ov } = usePoll(withAccount('/api/overview'), 5000);
+  const { data: sched } = usePoll(withAccount('/api/schedule'), 60000);
 
   if (ov && ov.setup && ov.setup.needs_setup) {
     return <SetupGuide setup={ov.setup} />;

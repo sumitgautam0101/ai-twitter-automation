@@ -30,7 +30,12 @@ from opensocial.core.db import (
     source_statuses,
     upsert_source_status,
 )
-from opensocial.core.engine import load_credentials, publish_post, run_due_slots
+from opensocial.core.engine import (
+    load_credentials_for_account,
+    publish_post,
+    resolve_account_for_niche,
+    run_due_slots,
+)
 from opensocial.core.filtering import filter_niche
 from opensocial.core.generate import generate_for_niche, generate_independent
 from opensocial.core.settings import Settings
@@ -44,18 +49,53 @@ def _niches(config_dir: str, slug: str | None):
 
 
 def _followed_niches(session_factory, config_dir: str, slug: str | None):
-    """Resolve the niche list for a no-slug command: the followed niches only.
+    """The niches a **shared fetch** should cover: the union of every
+    workspace's followed niches (each workspace owns its niches via
+    ``account_id``). An explicit ``slug`` still targets that single niche.
 
-    An explicit ``slug`` still targets that single niche (so the dashboard can
-    act on any niche on demand). With no slug, only the niches the user follows
-    are processed — unfollowed niches stay dormant (no source calls, no drafts).
+    Fetching is one shared pass across all workspaces — content is deduped in
+    ``content_items`` and linked per-niche in ``content_item_niches``. Before any
+    workspace exists, falls back to the legacy global followed list over all
+    niches so a pre-workspace install keeps fetching.
+    """
+    if slug:
+        return _niches(config_dir, slug)
+
+    from opensocial.core.db import list_platform_accounts
+    from opensocial.core.settings import get_followed_niches
+
+    niches = load_all_niches(config_dir)
+    with session_factory() as s:
+        accounts = list_platform_accounts(s)
+        if not accounts:
+            wanted = set(get_followed_niches(s, None))
+        else:
+            # Union of every workspace's followed niches. Fetch only needs to
+            # know a niche is wanted by *someone*; ownership (``account_id``,
+            # used by generate/publish) is deliberately not required here so a
+            # followed/owned drift never silently stops fetching.
+            wanted = set().union(
+                *(set(get_followed_niches(s, a.id)) for a in accounts)
+            )
+    return [n for n in niches if n.slug in wanted]
+
+
+def _workspace_niches(session_factory, config_dir: str, workspace_id: str, slug: str | None):
+    """A single workspace's target niches for generate/publish — its followed
+    niches from the shared catalog.
+
+    With ``slug`` set, that one niche (so the dashboard can act on demand);
+    otherwise the workspace's followed list. Niches are shared across
+    workspaces, so selection is the per-workspace followed list (namespaced),
+    not niche ownership — two workspaces may follow the same niche and each
+    generates/publishes independently under its own account.
     """
     if slug:
         return _niches(config_dir, slug)
     from opensocial.core.settings import get_followed_niches
 
     with session_factory() as s:
-        followed = set(get_followed_niches(s))
+        followed = set(get_followed_niches(s, workspace_id))
     return [n for n in load_all_niches(config_dir) if n.slug in followed]
 
 
@@ -139,64 +179,132 @@ def _do_fetch(
     return asyncio.run(run())
 
 
-def _do_generate(session_factory, config_dir: str, slug: str | None, limit: int) -> dict:
-    from opensocial.core.settings import load_ai_config
+def _ai_config_with_key(session, workspace_id: str | None) -> dict:
+    """A workspace's AI config with its own API key resolved into ``text``.
+
+    AI keys are per workspace; this injects the decrypted key (the workspace's,
+    else a legacy global default) so generation authenticates with the right
+    one without relying on a single shared ``os.environ`` value.
+    """
+    from opensocial.ai.text import PROVIDER_KEY_ENV
+    from opensocial.core.settings import get_scoped_secret, load_ai_config
+
+    ai_cfg = load_ai_config(session, workspace_id)
+    provider = ((ai_cfg.get("text") or {}).get("provider") or "").lower()
+    env = PROVIDER_KEY_ENV.get(provider)
+    if env:
+        key = get_scoped_secret(session, workspace_id, env)
+        if key:
+            ai_cfg = {**ai_cfg, "text": {**ai_cfg["text"], "api_key": key}}
+    return ai_cfg
+
+
+def _do_generate(
+    session_factory, config_dir: str, workspace_id: str, slug: str | None, limit: int
+) -> dict:
+    """Generate drafts for one workspace using its own AI config + niches."""
+    from opensocial.core.settings import get_scoped_secret
 
     result: dict[str, int] = {}
-    for niche in _followed_niches(session_factory, config_dir, slug):
+    for niche in _workspace_niches(session_factory, config_dir, workspace_id, slug):
         if not niche.enabled:
             continue
         with session_factory() as s:
-            config = {**niche.raw, "ai": load_ai_config(s)}
-            drafts = generate_for_niche(s, niche.slug, config, limit=limit)
-            drafts += generate_independent(s, niche.slug, config)
+            config = {**niche.raw, "ai": _ai_config_with_key(s, workspace_id)}
+            # Unsplash is a per-workspace key (like the AI keys): inject the
+            # workspace's own so ``get_image_provider`` can authenticate without
+            # a shared ``os.environ`` value.
+            unsplash_key = get_scoped_secret(s, workspace_id, "UNSPLASH_ACCESS_KEY")
+            if unsplash_key:
+                config["unsplash_access_key"] = unsplash_key
+            drafts = generate_for_niche(
+                s, niche.slug, config, limit=limit,
+                platform_account_id=workspace_id,
+            )
+            drafts += generate_independent(
+                s, niche.slug, config, platform_account_id=workspace_id,
+            )
         result[niche.slug] = len(drafts)
     return result
 
 
 def _do_run_slots(
-    session_factory, config_dir: str, slug: str | None, settings: Settings
+    session_factory,
+    config_dir: str,
+    workspace_id: str,
+    slug: str | None,
+    settings: Settings,
 ) -> dict:
     from dataclasses import replace
 
     # An explicit "run due now" from the dashboard dispatches even in manual
     # mode — the app_mode guard exists to stop *unattended* publishing only.
     settings = replace(settings, app_mode="auto")
+    from opensocial.core.db import get_platform_account
+
     published = 0
-    for niche in _followed_niches(session_factory, config_dir, slug):
+    for niche in _workspace_niches(session_factory, config_dir, workspace_id, slug):
         if not niche.enabled:
             continue
         with session_factory() as s:
-            creds = load_credentials(s, settings)
+            # Niches are shared, so publish as *this* workspace's account (not
+            # one resolved from the niche), drawing only its own drafts.
+            account = get_platform_account(s, workspace_id) if workspace_id else None
             outcomes = run_due_slots(
-                s, niche.slug, niche.raw, settings, credentials=creds
+                s, niche.slug, niche.raw, settings, account=account
             )
         published += sum(1 for o in outcomes if o.ok)
     return {"published": published}
 
 
 def _do_post_now(session_factory, config_dir: str, post_id: str, settings: Settings) -> dict:
+    from opensocial.core.settings import resolve_settings
+
     with session_factory() as s:
         post = s.get(GeneratedPost, post_id)
         if post is None:
             return {"error": "post not found"}
         niches = _niches(config_dir, post.niche_slug)
         config = niches[0].raw if niches else {}
-        creds = load_credentials(s, settings)
-        outcome = publish_post(s, post, config, settings, credentials=creds)
+        # Prefer the account stamped on the draft; otherwise resolve from the
+        # niche (or the sole account). Holds if it can't be determined.
+        account = None
+        if post.platform_account_id:
+            from opensocial.core.db import get_platform_account
+
+            account = get_platform_account(s, post.platform_account_id)
+        if account is None:
+            account = resolve_account_for_niche(s, config)
+        # Honour the owning workspace's dry-run setting for this manual publish.
+        settings = resolve_settings(s, account.id if account is not None else None)
+        # Hold only for live posting; dry-run still simulates without an account.
+        if account is None and not settings.dry_run:
+            return {"error": "no account assigned for this niche"}
+        account_id = account.id if account is not None else None
+        creds = (
+            load_credentials_for_account(s, settings, account_id)
+            if account_id
+            else None
+        )
+        outcome = publish_post(
+            s, post, config, settings, credentials=creds,
+            platform_account_id=account_id,
+        )
     return {"ok": outcome.ok, "dry_run": outcome.dry_run, "error": outcome.error}
 
 
 def _do_regenerate(session_factory, config_dir: str, post_id: str) -> dict:
     from opensocial.core.approval import regenerate
-    from opensocial.core.settings import load_ai_config
 
     with session_factory() as s:
         post = s.get(GeneratedPost, post_id)
         if post is None:
             return {"error": "post not found"}
         niches = _niches(config_dir, post.niche_slug)
-        config = {**(niches[0].raw if niches else {}), "ai": load_ai_config(s)}
+        config = {
+            **(niches[0].raw if niches else {}),
+            "ai": _ai_config_with_key(s, post.platform_account_id),
+        }
         regenerate(s, post, config)
     return {"ok": True}
 
@@ -206,17 +314,15 @@ def _do_regenerate(session_factory, config_dir: str, post_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _autopilot_window(session_factory, config_dir: str, now):
-    """Today's global posting window across followed niches: (first, last).
+def _window_for_niches(niches, now):
+    """Posting window (first, last) across a list of scheduled niches today.
 
-    Returns the earliest first slot and the latest last slot (both tz-aware,
-    server-local) among the followed+enabled niches that are on the schedule.
-    ``(None, None)`` when nothing is scheduled today.
+    ``(None, None)`` when none are scheduled. Both tz-aware, server-local.
     """
     from opensocial.core.scheduler import ScheduleConfig, resolve_slots
 
     first = last = None
-    for niche in _followed_niches(session_factory, config_dir, None):
+    for niche in niches:
         if not niche.enabled:
             continue
         slots = resolve_slots(ScheduleConfig.from_niche(niche.raw), niche.slug, now)
@@ -229,36 +335,54 @@ def _autopilot_window(session_factory, config_dir: str, now):
     return first, last
 
 
+def _auto_workspaces(session_factory):
+    """Workspace ids currently in ``auto`` app mode (per-workspace setting)."""
+    from opensocial.core.db import list_platform_accounts
+    from opensocial.core.settings import resolve_settings
+
+    with session_factory() as s:
+        ids = [a.id for a in list_platform_accounts(s)]
+        return [wid for wid in ids if resolve_settings(s, wid).app_mode == "auto"]
+
+
 def autopilot_refresh(
     session_factory: sessionmaker,
     *,
     config_dir: str = "config/niches",
-    settings: Settings,
+    settings: Settings | None = None,
     now=None,
 ) -> dict | None:
     """Top up the draft queue with fresh data, on a timed cadence.
 
-    In auto mode the worker calls this every tick. It actually does work only
-    when *now* falls inside the day's posting window — from ``X`` minutes before
-    the first slot (a warm-up so content is ready) up to ``X`` minutes before
-    the last slot — and at most once per ``X`` minutes. ``X`` is
-    ``settings.autopilot_fetch_minutes``; 0 disables it. When it fires it runs
-    fetch → filter → generate for the followed niches and stamps the run time so
-    the cadence is throttled across ticks. Returns a summary dict when it ran,
-    else ``None``.
+    The fetch is **shared** across workspaces; generation is **per workspace**.
+    It does work only when *now* falls inside the posting window of the
+    auto-mode workspaces — from ``X`` minutes before the first slot up to ``X``
+    before the last — and at most once per ``X`` minutes. ``X`` is the global
+    ``autopilot_fetch_minutes``; 0 disables it. ``settings`` is accepted for
+    back-compat but per-workspace app mode is resolved internally.
     """
     from datetime import datetime, timedelta, timezone
 
     from opensocial.core.db import get_app_setting, set_app_setting
+    from opensocial.core.settings import resolve_settings
 
-    if settings.app_mode != "auto":
-        return None
-    x_min = int(settings.autopilot_fetch_minutes)
+    with session_factory() as s:
+        x_min = int(resolve_settings(s, None).autopilot_fetch_minutes)
     if x_min <= 0:
         return None
 
+    auto_ids = _auto_workspaces(session_factory)
+    if not auto_ids:
+        return None
+
     now = now or datetime.now(timezone.utc)
-    first, last = _autopilot_window(session_factory, config_dir, now)
+    # Window spans the auto workspaces' followed niches.
+    auto_niches = [
+        n
+        for wid in auto_ids
+        for n in _workspace_niches(session_factory, config_dir, wid, None)
+    ]
+    first, last = _window_for_niches(auto_niches, now)
     if first is None:
         return None
 
@@ -280,8 +404,13 @@ def autopilot_refresh(
         except ValueError:
             pass
 
-    fetched = _do_fetch(session_factory, config_dir, None, settings)
-    generated = _do_generate(session_factory, config_dir, None, limit=5)
+    # One shared fetch pass for all workspaces, then per-workspace generation.
+    with session_factory() as s:
+        fetch_settings = resolve_settings(s, None)
+    fetched = _do_fetch(session_factory, config_dir, None, fetch_settings)
+    generated: dict[str, int] = {}
+    for wid in auto_ids:
+        generated.update(_do_generate(session_factory, config_dir, wid, None, limit=5))
     with session_factory() as s:
         set_app_setting(s, "autopilot_last_refresh", now.isoformat())
         new_items = sum(fetched.values())
@@ -312,20 +441,27 @@ def process_commands(
         jobs = [(c.id, c.type, dict(c.payload or {})) for c in claimed]
 
     for cmd_id, ctype, payload in jobs:
+        workspace_id = payload.get("workspace_id") or payload.get("workspace")
         try:
             if ctype == "fetch_sources":
+                # Fetch is shared across workspaces; a niche/source narrows it.
                 result = _do_fetch(
                     session_factory, config_dir, payload.get("niche"),
                     settings, payload.get("source"),
                 )
             elif ctype == "generate_posts":
                 result = _do_generate(
-                    session_factory, config_dir, payload.get("niche"),
-                    int(payload.get("limit", 5)),
+                    session_factory, config_dir, workspace_id,
+                    payload.get("niche"), int(payload.get("limit", 5)),
                 )
             elif ctype == "run_slots":
+                from opensocial.core.settings import resolve_settings
+
+                with session_factory() as s:
+                    ws_settings = resolve_settings(s, workspace_id)
                 result = _do_run_slots(
-                    session_factory, config_dir, payload.get("niche"), settings
+                    session_factory, config_dir, workspace_id,
+                    payload.get("niche"), ws_settings,
                 )
             elif ctype == "post_now":
                 result = _do_post_now(

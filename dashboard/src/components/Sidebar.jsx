@@ -1,8 +1,9 @@
 import React from 'react';
 import { LayoutGrid, Star, ListOrdered, CalendarDays, History, Share2, Database, ScrollText, Settings } from 'lucide-react';
-import { NAV } from '../data';
+import { NAV_GROUPS } from '../data';
 import { useApp } from '../AppContext';
 import { PulseDot } from './common';
+import WorkspaceMenu from './WorkspaceMenu';
 
 const ICONS = {
   dashboard: <LayoutGrid size={16} />,
@@ -29,37 +30,51 @@ export default function Sidebar() {
         <div className="os-mono" style={{ marginLeft: 'auto', fontSize: 9, color: '#4b5563', letterSpacing: '.5px' }}>v0.9</div>
       </div>
       <nav style={{ flex: 1, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {NAV.map(([id, label]) => {
-          const active = route === id;
-          const badge = NAV_BADGE[id];
-          return (
-            <button
-              key={id}
-              onClick={() => setRoute(id)}
-              className={`nav-btn${active ? ' active' : ''}`}
+        {NAV_GROUPS.map(([group, items], gi) => (
+          <React.Fragment key={group}>
+            <div
+              className="os-mono"
               style={{
-                display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', borderRadius: 8,
-                border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: active ? 600 : 500, width: '100%',
-                background: active ? '#15201b' : 'transparent', color: active ? '#3ecf8e' : '#8b93a0',
+                fontSize: 8.5, fontWeight: 700, letterSpacing: '.6px', color: '#4b5563',
+                padding: gi ? '14px 13px 6px' : '4px 13px 6px',
               }}
             >
-              <span style={{ display: 'flex', width: 16, height: 16, flexShrink: 0, opacity: 0.9 }}>{ICONS[id]}</span>
-              <span style={{ flex: 1, textAlign: 'left' }}>{label}</span>
-              {badge && (
-                <span
-                  className="os-mono"
+              {group}
+            </div>
+            {items.map(([id, label]) => {
+              const active = route === id;
+              const badge = NAV_BADGE[id];
+              return (
+                <button
+                  key={id}
+                  onClick={() => setRoute(id)}
+                  className={`nav-btn${active ? ' active' : ''}`}
                   style={{
-                    fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999,
-                    background: active ? 'rgba(62,207,142,.16)' : '#1c222b', color: active ? '#3ecf8e' : '#8b93a0',
+                    display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', borderRadius: 8,
+                    border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: active ? 600 : 500, width: '100%',
+                    background: active ? '#15201b' : 'transparent', color: active ? '#3ecf8e' : '#8b93a0',
                   }}
                 >
-                  {badge}
-                </span>
-              )}
-            </button>
-          );
-        })}
+                  <span style={{ display: 'flex', width: 16, height: 16, flexShrink: 0, opacity: 0.9 }}>{ICONS[id]}</span>
+                  <span style={{ flex: 1, textAlign: 'left' }}>{label}</span>
+                  {badge && (
+                    <span
+                      className="os-mono"
+                      style={{
+                        fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999,
+                        background: active ? 'rgba(62,207,142,.16)' : '#1c222b', color: active ? '#3ecf8e' : '#8b93a0',
+                      }}
+                    >
+                      {badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </React.Fragment>
+        ))}
       </nav>
+      <WorkspaceMenu />
       <div style={{ padding: '12px 16px', borderTop: '1px solid #1a1f27', display: 'flex', alignItems: 'center', gap: 8 }}>
         <PulseDot color={status ? '#3ecf8e' : '#f5455c'} />
         <span className="os-mono" style={{ fontSize: 10, color: '#6b7280' }}>

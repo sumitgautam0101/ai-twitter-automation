@@ -64,6 +64,13 @@
       "tags": [
         "artificial-intelligence",
         "machine-learning"
+      ],
+      "enabled": false
+    },
+    "rss": {
+      "category": "ai",
+      "feeds": [
+        "https://www.artificialintelligence-news.com/feed/"
       ]
     }
   },
@@ -76,18 +83,18 @@
     "enabled": false,
     "image": "ai"
   },
-  "image_source": "none",
+  "image_source": "unsplash",
   "schedule": {
     "windows": [
       [
-        "08:00",
-        "23:30"
+        "15:15",
+        "21:00"
       ]
     ],
     "posts_per_day": [
-      4,
-      4
+      7,
+      7
     ],
-    "min_gap_minutes": 45
+    "min_gap_minutes": 5
   }
 }

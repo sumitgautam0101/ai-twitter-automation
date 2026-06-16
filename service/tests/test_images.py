@@ -63,6 +63,25 @@ def test_unsplash_degrades_to_none_without_key(monkeypatch):
     assert UnsplashProvider().image_for("a sunset over mountains") is None
 
 
+def test_unsplash_uses_per_workspace_key_over_env(monkeypatch):
+    # The per-workspace key (injected via config) wins, and works even when the
+    # process env has none set — so two workspaces can use different keys.
+    monkeypatch.delenv("UNSPLASH_ACCESS_KEY", raising=False)
+    provider = get_image_provider({"image_source": "unsplash", "unsplash_access_key": "ws-key"})
+    assert isinstance(provider, UnsplashProvider)
+    assert provider.access_key == "ws-key"
+
+    seen: dict[str, str] = {}
+
+    def fake_fetch(self, query, key):
+        seen["key"] = key
+        return None
+
+    monkeypatch.setattr(UnsplashProvider, "_fetch", fake_fetch)
+    provider.image_for("a sunset over mountains")
+    assert seen["key"] == "ws-key"
+
+
 def test_unsplash_broadens_query_on_no_match(monkeypatch):
     # First (specific) query finds nothing; the broadened fallback succeeds —
     # so we degrade to a relevant photo instead of dropping the image.

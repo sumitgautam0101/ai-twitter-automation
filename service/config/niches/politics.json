@@ -46,5 +46,18 @@
       "section": "politics",
       "limit": 20
     }
+  },
+  "schedule": {
+    "windows": [
+      [
+        "15:15",
+        "21:00"
+      ]
+    ],
+    "posts_per_day": [
+      11,
+      11
+    ],
+    "min_gap_minutes": 5
   }
 }

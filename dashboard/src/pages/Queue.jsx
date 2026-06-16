@@ -236,11 +236,11 @@ function QueueCard({ post, reload, maxAttempts }) {
 const STATUS_FILTERS = ['all', 'draft', 'published', 'rejected'];
 
 export default function Queue() {
-  const { niche, status } = useApp();
+  const { niche, status, withAccount } = useApp();
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState('all');
   const { data: posts, reload } = usePoll(
-    niche === 'all' ? '/api/posts' : `/api/posts?niche=${encodeURIComponent(niche)}`,
+    withAccount(niche === 'all' ? '/api/posts' : `/api/posts?niche=${encodeURIComponent(niche)}`),
     5000
   );
   const all = (posts || []).filter((p) => statusFilter === 'all' || p.status === statusFilter);

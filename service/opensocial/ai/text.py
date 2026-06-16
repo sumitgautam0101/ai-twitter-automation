@@ -41,9 +41,18 @@ class LiteLLMProvider(TextProvider):
     credentials store injects, so they never have to be passed in here.
     """
 
-    def __init__(self, model: str = "ollama/gemma3:4b", api_base: str | None = None, **params) -> None:
+    def __init__(
+        self,
+        model: str = "ollama/gemma3:4b",
+        api_base: str | None = None,
+        api_key: str | None = None,
+        **params,
+    ) -> None:
         self.model = model
         self.api_base = (api_base or "").strip() or None
+        # Explicit per-workspace key; falls back to the process env when None so
+        # two workspaces can authenticate with different keys in one process.
+        self.api_key = (api_key or "").strip() or None
         self.params = params
         self.name = model
 
@@ -53,6 +62,8 @@ class LiteLLMProvider(TextProvider):
         kwargs = dict(self.params)
         if self.api_base:
             kwargs["api_base"] = self.api_base
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
         resp = litellm.completion(
             model=self.model,
             messages=[
@@ -103,6 +114,14 @@ PROVIDER_MODEL_DEFAULTS = {
     "litellm": "ollama/gemma3:4b",  # legacy provider name
 }
 
+# Which credential a text provider authenticates with. ``local`` / ``template``
+# need none. Used to resolve the right per-workspace key for generation.
+PROVIDER_KEY_ENV = {
+    "claude": "ANTHROPIC_API_KEY",
+    "chatgpt": "OPENAI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
 
 class TextProviderError(RuntimeError):
     """Raised when a configured real provider can't be built or used.
@@ -132,6 +151,7 @@ def get_text_provider(config: dict | None) -> TextProvider:
 
     model = ai.get("model") or PROVIDER_MODEL_DEFAULTS.get(provider, "ollama/llama3")
     endpoint = ai.get("endpoint") or None
+    api_key = ai.get("api_key") or None  # per-workspace key injected by callers
     params = {k: v for k, v in ai.items() if k in ("temperature", "max_tokens")}
     try:
         import litellm  # noqa: F401
@@ -141,4 +161,4 @@ def get_text_provider(config: dict | None) -> TextProvider:
             "installed. Install it (pip install litellm) and restart — refusing "
             "to fall back to the offline template provider."
         ) from exc
-    return LiteLLMProvider(model=model, api_base=endpoint, **params)
+    return LiteLLMProvider(model=model, api_base=endpoint, api_key=api_key, **params)

@@ -523,9 +523,11 @@ function SourceEditor({ src, niches, keySet, reload, reloadCreds }) {
 // page
 // ===========================================================================
 export default function Sources() {
-  const { runCommand, commands } = useApp();
+  const { runCommand, commands, withWorkspace } = useApp();
   const { data: sources, reload } = usePoll('/api/sources', 10000);
-  const { data: niches } = usePoll('/api/niches', 30000);
+  // Scope to the current workspace so each niche's ``followed`` flag reflects
+  // *this* workspace's selection — that drives the "Selected niches only" filter.
+  const { data: niches } = usePoll(withWorkspace('/api/niches'), 30000);
   const { data: creds, reload: reloadCreds } = usePoll('/api/credentials', 30000);
 
   const [open, setOpen] = useState(null);

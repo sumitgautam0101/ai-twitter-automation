@@ -95,5 +95,18 @@
     "per_day": 2,
     "types": []
   },
-  "image_source": "content"
+  "image_source": "content",
+  "schedule": {
+    "windows": [
+      [
+        "15:15",
+        "21:00"
+      ]
+    ],
+    "posts_per_day": [
+      9,
+      9
+    ],
+    "min_gap_minutes": 5
+  }
 }

@@ -57,12 +57,90 @@ def _truthy_false(value: str) -> bool:
     return value.strip().lower() in ("0", "false", "no", "off")
 
 
-def resolve_settings(session) -> Settings:
+# ---------------------------------------------------------------------------
+# Per-workspace settings storage
+# ---------------------------------------------------------------------------
+#
+# A workspace is one X account (its ``PlatformAccount.id`` is the workspace id).
+# Workspace-scoped settings live in ``app_settings`` under ``ws:<id>:<key>``;
+# reads fall back to the legacy un-namespaced ``<key>`` (then env) so a
+# pre-workspace install keeps working and its values become the defaults a new
+# workspace inherits until it customizes them. Source config + the Fernet key +
+# the shared fetch cadence stay global (un-namespaced).
+
+
+def _ws_prefix(workspace_id: str | None) -> str:
+    return f"ws:{workspace_id}:" if workspace_id else ""
+
+
+def get_scoped_setting(session, workspace_id: str | None, key: str) -> str | None:
+    """Read ``ws:<id>:key`` for a workspace, falling back to the legacy global
+    ``key``. With no workspace, reads the legacy global key directly."""
+    from opensocial.core.db import get_app_setting
+
+    if workspace_id:
+        scoped = get_app_setting(session, f"ws:{workspace_id}:{key}")
+        if scoped is not None:
+            return scoped
+    return get_app_setting(session, key)
+
+
+def set_scoped_setting(session, workspace_id: str | None, key: str, value: str) -> None:
+    """Persist a workspace-scoped setting (global key when no workspace)."""
+    from opensocial.core.db import set_app_setting
+
+    set_app_setting(session, f"{_ws_prefix(workspace_id)}{key}", value)
+
+
+# ---------------------------------------------------------------------------
+# Per-workspace encrypted secrets (AI keys live here; source keys stay global)
+# ---------------------------------------------------------------------------
+#
+# AI API keys are per workspace, stored Fernet-encrypted under
+# ``ws:<id>:secret:<ENV>``. Reads fall back to the legacy global ``secret:<ENV>``
+# (and the process env) so a pre-workspace install keeps working. Unlike global
+# secrets these are **not** injected into ``os.environ`` — generation passes the
+# resolved key explicitly so two workspaces can use different keys at once.
+
+
+def set_scoped_secret(
+    session, workspace_id: str | None, env_name: str, value: str, secret_key: str
+) -> None:
+    """Encrypt and store a workspace's API key under ``ws:<id>:secret:<ENV>``."""
+    from opensocial.core.secrets import encrypt_credentials
+
+    blob = encrypt_credentials({"value": value}, secret_key)
+    set_scoped_setting(session, workspace_id, f"secret:{env_name}", blob.decode("ascii"))
+
+
+def has_scoped_secret(session, workspace_id: str | None, env_name: str) -> bool:
+    """Whether a workspace has this key (its own, or a legacy global default)."""
+    return bool(get_scoped_setting(session, workspace_id, f"secret:{env_name}"))
+
+
+def get_scoped_secret(
+    session, workspace_id: str | None, env_name: str
+) -> str | None:
+    """Decrypt a workspace's API key (own value, else legacy global)."""
+    from opensocial.core.secrets import SecretsError, decrypt_credentials
+
+    raw = get_scoped_setting(session, workspace_id, f"secret:{env_name}")
+    if not raw:
+        return None
+    secret_key = resolve_settings(session).secret_key
+    try:
+        return decrypt_credentials(raw.encode("ascii"), secret_key).get("value")
+    except SecretsError:
+        return None
+
+
+def resolve_settings(session, workspace_id: str | None = None) -> Settings:
     """Env settings overlaid with the dashboard's runtime overrides.
 
-    The dashboard persists ``dry_run`` / ``app_mode`` in ``app_settings`` so
-    toggling them doesn't need a service restart. The same fail-safe applies:
-    dry-run only switches off on an explicit "false".
+    ``dry_run`` and ``app_mode`` are **per workspace** (``ws:<id>:…`` with a
+    legacy global fallback) so each workspace publishes on its own terms. The
+    fetch cadence and global cap stay global, and ``secret_key`` is global. The
+    same fail-safe applies: dry-run only switches off on an explicit "false".
     """
     from dataclasses import replace
 
@@ -70,11 +148,11 @@ def resolve_settings(session) -> Settings:
 
     base = Settings.from_env()
 
-    dry = get_app_setting(session, "dry_run")
+    dry = get_scoped_setting(session, workspace_id, "dry_run")
     if dry is not None:
         base = replace(base, dry_run=not _truthy_false(dry))
 
-    mode = (get_app_setting(session, "app_mode") or "").strip().lower()
+    mode = (get_scoped_setting(session, workspace_id, "app_mode") or "").strip().lower()
     if mode in ("manual", "auto"):
         base = replace(base, app_mode=mode)
 
@@ -125,15 +203,14 @@ DEFAULT_AI: dict = {
 }
 
 
-def load_ai_config(session) -> dict:
-    """Resolve the global AI config (stored blob overlaid on the defaults).
+def load_ai_config(session, workspace_id: str | None = None) -> dict:
+    """Resolve a workspace's AI config (stored blob overlaid on the defaults).
 
-    Returns the ``ai`` block shape that ``get_text_provider`` /
-    ``get_image_provider`` expect, so callers can inject it as ``config['ai']``.
+    Reads ``ws:<id>:ai`` with a legacy global fallback. Returns the ``ai`` block
+    shape that ``get_text_provider`` / ``get_image_provider`` expect, so callers
+    can inject it as ``config['ai']``.
     """
-    from opensocial.core.db import get_app_setting
-
-    raw = get_app_setting(session, "ai")
+    raw = get_scoped_setting(session, workspace_id, "ai")
     if not raw:
         return {k: dict(v) for k, v in DEFAULT_AI.items()}
 
@@ -149,12 +226,10 @@ def _merge_ai(stored: dict) -> dict:
     return {"text": {**DEFAULT_AI["text"], **(stored.get("text") or {})}}
 
 
-def save_ai_config(session, config: dict) -> dict:
-    """Persist the global AI config (text generation only)."""
-    from opensocial.core.db import set_app_setting
-
+def save_ai_config(session, config: dict, workspace_id: str | None = None) -> dict:
+    """Persist a workspace's AI config (text generation only)."""
     resolved = _merge_ai(config or {})
-    set_app_setting(session, "ai", json.dumps(resolved))
+    set_scoped_setting(session, workspace_id, "ai", json.dumps(resolved))
     return resolved
 
 
@@ -168,11 +243,12 @@ def save_ai_config(session, config: dict) -> dict:
 # a JSON list of slugs in ``app_settings`` under ``followed_niches``.
 
 
-def get_followed_niches(session) -> list[str]:
-    """Return the selected niche slugs (``[]`` if none set)."""
-    from opensocial.core.db import get_app_setting
+def get_followed_niches(session, workspace_id: str | None = None) -> list[str]:
+    """Return a workspace's selected niche slugs (``[]`` if none set).
 
-    raw = get_app_setting(session, "followed_niches")
+    Reads ``ws:<id>:followed_niches`` with a legacy global fallback.
+    """
+    raw = get_scoped_setting(session, workspace_id, "followed_niches")
     if not raw:
         return []
     try:
@@ -184,17 +260,17 @@ def get_followed_niches(session) -> list[str]:
     return [str(s) for s in value if isinstance(s, str) and s.strip()]
 
 
-def set_followed_niches(session, slugs: list[str]) -> list[str]:
-    """Persist the selected niches, de-duplicated (no cap).
+def set_followed_niches(
+    session, slugs: list[str], workspace_id: str | None = None
+) -> list[str]:
+    """Persist a workspace's selected niches, de-duplicated (no cap).
 
     Order is preserved; duplicates are dropped keeping first occurrence.
     """
-    from opensocial.core.db import set_app_setting
-
     seen: list[str] = []
     for slug in slugs or []:
         s = str(slug).strip()
         if s and s not in seen:
             seen.append(s)
-    set_app_setting(session, "followed_niches", json.dumps(seen))
+    set_scoped_setting(session, workspace_id, "followed_niches", json.dumps(seen))
     return seen
