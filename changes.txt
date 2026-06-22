@@ -1,0 +1,5 @@
+featured images extraction logic subhi me sahi se work nahi kar raha
+
+reddit pe rate limit fix karni hai 
+
+unsplash image search theek karna hai (more accurate and better matches)
